@@ -8,29 +8,26 @@
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@24,400,1,0&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
 <style>
-/* ══ BLOCKER ADS — cache tous les éléments publicitaires ══ */
+/* ══ BLOCKER ADS ULTRA — cache tous les éléments publicitaires ══ */
 iframe[src*="ads"],iframe[src*="doubleclick"],iframe[src*="googlesyndication"],
 iframe[src*="adnxs"],iframe[src*="cdn4ads"],iframe[src*="taboola"],
 iframe[src*="outbrain"],iframe[src*="mgid"],iframe[src*="revcontent"],
-iframe[src*="popads"],iframe[src*="popcash"],iframe[src*="propeller"],
-iframe[src*="exoclick"],iframe[src*="monetag"],iframe[src*="adsterra"],
+iframe[src*="popads"],iframe[src*="popcash"],iframe[src*="exoclick"],
+iframe[src*="propellerads"],iframe[src*="monetag"],iframe[src*="adsterra"],
+iframe[style*="display:none"],iframe[width="0"],iframe[height="0"],
+iframe[style*="width:0"],iframe[style*="height:0"],
 div[class*="ad-"],div[id*="ad-"],div[class*="banner-ad"],
 div[class*="popup"],div[class*="overlay-ad"],div[id*="popup"],
 div[id*="banner"],div[class*="interstitial"],div[id*="interstitial"],
 a[href*="doubleclick"],a[href*="cdn4ads"],[data-ad],
 .adsbygoogle,ins.adsbygoogle,.ad-container,.pub-container,
-div[style*="z-index: 9999"]:not(#modal):not(#vipModal):not(#dlModal):not(#infoModal),
-div[style*="z-index:9999"]:not(#modal):not(#vipModal):not(#dlModal):not(#infoModal){
+div[style*="z-index: 9999"]:not(#modal):not(#vipModal):not(#dlModal):not(#infoModal):not(#boot),
+div[style*="z-index:9999"]:not(#modal):not(#vipModal):not(#dlModal):not(#infoModal):not(#boot){
   display:none!important;visibility:hidden!important;
   pointer-events:none!important;opacity:0!important;
 }
-/* Bloquer les iframes pub cachées */
-iframe[style*="display:none"],iframe[style*="display: none"],
-iframe[width="0"],iframe[height="0"],
-iframe[style*="visibility:hidden"],iframe[style*="width:0"],
-iframe[style*="height:0"]{
-  display:none!important;pointer-events:none!important;
-}
+/* Bloquer les iframes pub injectées */
+body>iframe:not(#pFrame){display:none!important;pointer-events:none!important;}
 
 :root{
   --bg:#080d1a;--bg2:#0e1526;--sf:#141e33;--s2:#1b2640;--s3:#22304f;
@@ -527,12 +524,10 @@ const _AD=['doubleclick','googlesyndication','googletagmanager','google-analytic
   'trafficjunky','exoclick','juicyads','taboola','outbrain','mgid','revcontent',
   'omnitagjs','prebid','adsense','bidvertiser','hilltopads','scorecardresearch',
   'popunder','clickadu','monetag','adsterra','runative','adcash',
-  '1xbet','betway','casino','xbet',
-  'imasdk.googleapis','fwmrm.net','aniview','a-ads.com',
-  'popunder.ru','popcash.net','popads.net',
-  'trafficfactory','traffichunt','adspyglass',
-  'ero-advertising','adultadworld','juicyads',
-  'cpmstar','owneriq','undertone','yieldmo'];
+  '1xbet','betway','casino','xbet','imasdk.googleapis','fwmrm.net','aniview',
+  'a-ads.com','trafficfactory','traffichunt','adspyglass','cpmstar',
+  'owneriq','undertone','yieldmo','sonobi','pubmatic','openx','appnexus',
+  'criteo','adsrvr','advertising.com','amazon-adsystem'];
 function _isAd(u){return typeof u==='string'&&_AD.some(d=>u.toLowerCase().includes(d));}
 // Bloquer XHR
 const origOpen=XMLHttpRequest.prototype.open;
@@ -564,15 +559,14 @@ const SERVER = window.RENDER_SERVER || "";
 const _conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
 const _isSlowConn = _conn && (_conn.saveData || ['slow-2g','2g'].includes(_conn.effectiveType));
 // Taille image adaptée à la connexion
-const IMG_BASE = 'https://image.themoviedb.org/t/p/';
 const IMG_SIZE = _isSlowConn ? 'w185' : 'w342';
 const IMG_ORIG = _isSlowConn ? 'w500'  : 'original';
-// Fonction proxy image — envoie l'URL complète TMDB au proxy backend
+const TMDB_BASE = 'https://image.themoviedb.org/t/p/';
+// Proxy image — envoie l'URL TMDB complète au backend
 function imgUrl(path, size) {
   if(!path) return '';
-  return '/api/rtm/img?u='+encodeURIComponent(IMG_BASE+size+path);
+  return '/api/rtm/img?u=' + encodeURIComponent(TMDB_BASE + size + path);
 }
-// Informer le serveur du type de connexion pour optimiser
 if(_isSlowConn) console.log('[DC] Mode économie data activé:', _conn?.effectiveType);
 
 let currentTab='movies',heroItems=[],heroIdx=0,heroTimer=null;
@@ -781,21 +775,44 @@ function showInfiniteSection(sec){
 function setupInfiniteScroll(){
   const sentinel=document.getElementById('infSentinel');
   if(!sentinel)return;
-  const obs=new IntersectionObserver(async(entries)=>{
-    if(!entries[0].isIntersecting||infLoading||infDone)return;
+
+  async function loadMore(){
+    if(infLoading||infDone)return;
     infLoading=true;
     try{
       const url=infEndpoint+(infEndpoint.includes('?')?'&':'?')+'page='+infPage;
       const d=await apiFetch(url);
       const results=d.results||[];
-      if(!results.length){infDone=true;document.getElementById('infLoader').style.display='none';return;}
+      const loader=document.getElementById('infLoader');
+      if(!results.length){
+        infDone=true;
+        if(loader)loader.style.display='none';
+        return;
+      }
       const grid=document.getElementById('infGrid');
+      if(!grid)return;
       results.forEach(item=>grid.appendChild(mkCard(item,infType)));
       infPage++;
-    }catch(e){infDone=true;}
-    finally{infLoading=false;}
-  },{rootMargin:'300px',threshold:0.1});
+    }catch(e){
+      console.warn('[InfScroll]',e.message);
+      infDone=true;
+    }finally{
+      infLoading=false;
+    }
+  }
+
+  // IntersectionObserver avec rootMargin généreux
+  const obs=new IntersectionObserver((entries)=>{
+    if(entries[0].isIntersecting)loadMore();
+  },{rootMargin:'500px',threshold:0});
   obs.observe(sentinel);
+
+  // Fallback scroll natif (mobile/navigateurs anciens)
+  window.addEventListener('scroll',function _scl(){
+    if(infDone){window.removeEventListener('scroll',_scl);return;}
+    const distFromBottom=document.documentElement.scrollHeight-window.scrollY-window.innerHeight;
+    if(distFromBottom<800)loadMore();
+  },{passive:true});
 }
 
 function stopInfinite(){infDone=true;infLoading=false;}
@@ -926,67 +943,168 @@ function openPlayerWithToken(det,type,item){
   }
 }
 
+// ══ PROVIDERS EMBED ══════════════════════════════════════
+// Liste des providers fallback (cachés côté serveur)
+// Le backend retourne l'URL du premier provider, si fail on essaie les suivants
+let _embedRetry=0;
+const _MAX_EMBED_RETRY=3;
+
 function loadEmbed(token,s,ep){
-  showPLoad(true,'Démarrage...');
-  const f=document.getElementById('pFrame');
-  f.onload=null;f.onerror=null;f.style.display='none';f.src='about:blank';
-  if(window._et)clearTimeout(window._et);if(window._ew)clearTimeout(window._ew);
-  // Étape 1 : récupérer l'URL du player via API (retourne JSON {url:...})
-  let apiUrl=`/api/rtm/embed?token=${encodeURIComponent(token)}`;
-  if(s!=null&&s>0)apiUrl+=`&s=${s}&ep=${ep||1}`;
-  fetch(apiUrl)
-    .then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
-    .then(data=>{
-      if(!data.url)throw new Error('No URL');
-      // Étape 2 : Wrapper HTML avec ad-blocker intégré
-      const blob=new Blob([buildPlayerPage(data.url)],{type:'text/html'});
-      const blobUrl=URL.createObjectURL(blob);
-      f.onload=function(){f.onload=null;URL.revokeObjectURL(blobUrl);f.style.display='block';window._et=setTimeout(()=>showPLoad(false),2500);};
-      f.onerror=function(){f.onerror=null;if(window._et)clearTimeout(window._et);showPLoad(true,'❌ Player indisponible.');};
-      window._ew=setTimeout(()=>{if(document.getElementById('pLoad').style.display!=='none')showPLoad(true,'⏱ Chargement lent...');},25000);
-      f.src=blobUrl;
-    })
-    .catch(e=>{console.error('Embed error:',e);showPLoad(true,'❌ Erreur de chargement. Réessayez.');});
+  _embedRetry=0;
+  _tryEmbed(token,s,ep,_embedRetry);
 }
 
-// Page wrapper player avec ad-blocker ultra-puissant
-function buildPlayerPage(embedUrl){
-  const adDomains=['doubleclick','googlesyndication','googletagmanager','google-analytics',
+async function _tryEmbed(token,s,ep,attempt){
+  showPLoad(true,attempt>0?`Tentative ${attempt+1}/${_MAX_EMBED_RETRY+1}...`:'Démarrage du player...');
+  const f=document.getElementById('pFrame');
+  f.onload=null;f.onerror=null;
+  try{f.style.display='none';f.src='about:blank';}catch(_){}
+  if(window._et)clearTimeout(window._et);
+  if(window._ew)clearTimeout(window._ew);
+
+  // Étape 1 : récupérer l'URL embed via API (retourne JSON {url:"https://..."})
+  let apiUrl=`/api/rtm/embed?token=${encodeURIComponent(token)}`;
+  if(s!=null&&s>0)apiUrl+=`&s=${s}&ep=${ep||1}`;
+  if(attempt>0)apiUrl+=`&retry=${attempt}`; // signale au backend d'essayer un autre provider
+
+  try{
+    const resp=await fetch(apiUrl);
+    if(!resp.ok)throw new Error('HTTP '+resp.status);
+    const data=await resp.json();
+    if(!data.url)throw new Error('No URL from server');
+
+    // Étape 2 : créer un wrapper HTML avec ad-blocker intégré
+    // On ne charge PAS l'URL embed directement dans notre iframe principale
+    // → on crée un blob HTML qui contient l'iframe du provider
+    const wrapHtml=_buildPlayerPage(data.url);
+    const blob=new Blob([wrapHtml],{type:'text/html'});
+    const blobUrl=URL.createObjectURL(blob);
+
+    // Timeout de chargement : 30s
+    window._ew=setTimeout(()=>{
+      if(document.getElementById('pLoad').style.display!=='none'){
+        showPLoad(true,'⏱ Chargement lent... patientez');
+      }
+    },20000);
+
+    f.onload=function(){
+      f.onload=null;
+      try{URL.revokeObjectURL(blobUrl);}catch(_){}
+      f.style.display='block';
+      window._et=setTimeout(()=>showPLoad(false),2000);
+    };
+    f.onerror=function(){
+      f.onerror=null;
+      if(window._et)clearTimeout(window._et);
+      if(window._ew)clearTimeout(window._ew);
+      // Retry automatique
+      if(_embedRetry<_MAX_EMBED_RETRY){
+        _embedRetry++;
+        setTimeout(()=>_tryEmbed(token,s,ep,_embedRetry),1500);
+      }else{
+        showPLoad(true,'❌ Player indisponible. Réessayez plus tard.');
+      }
+    };
+    f.src=blobUrl;
+
+  }catch(e){
+    console.error('[Embed] Erreur:', e.message);
+    if(_embedRetry<_MAX_EMBED_RETRY){
+      _embedRetry++;
+      setTimeout(()=>_tryEmbed(token,s,ep,_embedRetry),2000);
+    }else{
+      showPLoad(true,'❌ Erreur de chargement. Vérifiez votre connexion.');
+    }
+  }
+}
+
+// ══ WRAPPER HTML PLAYER avec ad-blocker ultra-puissant ══
+function _buildPlayerPage(embedUrl){
+  const adDomains=JSON.stringify([
+    'doubleclick','googlesyndication','googletagmanager','google-analytics',
     'adservice','pagead','adnxs','cdn4ads','popads','popcash','propellerads',
     'trafficjunky','exoclick','juicyads','taboola','outbrain','mgid','revcontent',
     'omnitagjs','prebid','adsense','bidvertiser','hilltopads','scorecardresearch',
     'popunder','clickadu','monetag','adsterra','runative','adcash',
-    '1xbet','betway','casino','xbet','imasdk.googleapis','fwmrm.net','aniview','cdn4'];
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8">
-<style>*{margin:0;padding:0}html,body{width:100%;height:100%;background:#000;overflow:hidden}
-iframe{width:100%;height:100%;border:none}
-div[style*="z-index: 9999"]:not(#pw),div[style*="z-index:9999"]:not(#pw),
-div[id*="ad"],div[class*="ad-"],ins.adsbygoogle,.adsbygoogle,
-div[class*="popup"],div[class*="overlay"]{display:none!important;pointer-events:none!important}</style>
+    '1xbet','betway','casino','xbet','imasdk.googleapis','fwmrm.net','aniview',
+    'a-ads.com','popcash.net','popads.net','trafficfactory','traffichunt',
+    'adspyglass','ero-advertising','cpmstar','owneriq','undertone','yieldmo',
+    'pornhub','xvideos','xhamster','brazzers','redtube','tube8','youporn'
+  ]);
+  // Sanitize l'URL pour éviter l'injection
+  const safeUrl=embedUrl.replace(/"/g,'%22').replace(/'/g,'%27').replace(/</g,'%3C').replace(/>/g,'%3E');
+  return `<!DOCTYPE html><html><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;background:#000;overflow:hidden}
+#fw{width:100%;height:100%;position:relative}
+#pif{width:100%;height:100%;border:none;display:block;background:#000}
+/* Bloquer les overlays pub */
+div[style*="z-index: 9999"]:not(#fw),div[style*="z-index:9999"]:not(#fw),
+div[style*="position: fixed"][style*="top: 0"]:not(#fw),
+div[id*="ad"],div[class*="ad-"],div[class*="popup-"],div[class*="overlay"],
+ins.adsbygoogle,.adsbygoogle,div[class*="interstitial"],
+iframe[style*="display:none"],iframe[width="0"],iframe[height="0"],
+iframe[style*="width:0"],iframe[style*="height:0"]{
+  display:none!important;visibility:hidden!important;pointer-events:none!important;
+}
+</style>
 </head><body>
-<div id="pw" style="width:100%;height:100%">
-<iframe src="${embedUrl}" allowfullscreen
-  allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
-  sandbox="allow-scripts allow-same-origin allow-forms allow-presentation allow-popups-to-escape-sandbox">
-</iframe></div>
+<div id="fw">
+  <iframe id="pif" src="${safeUrl}"
+    allowfullscreen
+    allow="autoplay; fullscreen; picture-in-picture; encrypted-media; accelerometer; gyroscope"
+    sandbox="allow-scripts allow-same-origin allow-forms allow-presentation allow-popups-to-escape-sandbox">
+  </iframe>
+</div>
 <script>
-const _AD=${JSON.stringify(adDomains)};
-function _ia(u){if(!u)return false;const l=String(u).toLowerCase();return _AD.some(d=>l.includes(d));}
-const _oX=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u,...a){if(_ia(u))return;return _oX.call(this,m,u,...a);};
-const _oF=window.fetch;window.fetch=function(u,...a){if(_ia(String(u)))return Promise.resolve(new Response('',{status:200}));return _oF.call(this,u,...a);};
-window.open=()=>null;window.alert=()=>null;window.confirm=()=>true;window.prompt=()=>null;
-window.addEventListener('beforeunload',e=>{e.preventDefault();e.returnValue='';},true);
-function _ca(){document.querySelectorAll('div,ins,aside').forEach(el=>{
-  const id=(el.id||'').toLowerCase();const cl=(el.className||'').toLowerCase();
-  if(el.id==='pw'||el.querySelector('iframe'))return;
-  if(id.includes('ad')||cl.includes('ad-')||cl.includes('popup')||cl.includes('overlay')||cl.includes('banner')){el.style.display='none';el.style.pointerEvents='none';return;}
-  const z=parseInt(el.style.zIndex||getComputedStyle(el).zIndex||0);
-  const p=el.style.position||getComputedStyle(el).position;
-  if(z>100&&(p==='fixed'||p==='absolute')){el.style.display='none';el.style.pointerEvents='none';}
-});}
-new MutationObserver(_ca).observe(document.body,{childList:true,subtree:true});
-setInterval(_ca,1000);
-<\/script></body></html>`;
+(function(){
+  var AD=${adDomains};
+  function ia(u){if(!u||typeof u!=='string')return false;var l=u.toLowerCase();return AD.some(function(d){return l.indexOf(d)>=0;});}
+  // Bloquer XHR vers ads
+  var oX=XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open=function(m,u){if(ia(String(u)))return;return oX.apply(this,arguments);};
+  // Bloquer fetch vers ads
+  var oF=window.fetch;
+  window.fetch=function(u){if(ia(String(u)))return Promise.resolve(new Response('',{status:200}));return oF.apply(this,arguments);};
+  // Bloquer popups
+  window.open=function(){return null;};
+  window.alert=function(){};
+  window.confirm=function(){return true;};
+  window.prompt=function(){return null;};
+  // Bloquer navigation non voulue
+  window.addEventListener('beforeunload',function(e){e.preventDefault();e.returnValue='';},true);
+  // Observer DOM pour supprimer overlays/pubs dynamiques
+  function clean(){
+    try{
+      document.querySelectorAll('div,ins,aside,section').forEach(function(el){
+        if(el.id==='fw'||el.id==='pif')return;
+        var id=(el.id||'').toLowerCase();
+        var cl=(el.className||'').toLowerCase();
+        // Supprimer par ID/classe publicitaire
+        if(id.match(/^(ad|ads|advert|banner|popup|overlay|interstitial|sponsor|promo)/)
+          ||cl.match(/(^|\s)(ad[-_]|ads[-_]|advert|banner-ad|popup|overlay|interstitial)/)){
+          el.style.cssText='display:none!important;pointer-events:none!important';return;
+        }
+        // Supprimer les éléments positionnés en overlay avec z-index élevé
+        var z=parseInt(el.style.zIndex||0)||parseInt(getComputedStyle(el).zIndex||0)||0;
+        var p=el.style.position||getComputedStyle(el).position;
+        if(z>100&&(p==='fixed'||p==='absolute')&&!el.querySelector('video,canvas')){
+          el.style.cssText='display:none!important;pointer-events:none!important';
+        }
+      });
+    }catch(_){}
+  }
+  // Observer les mutations
+  if(window.MutationObserver){
+    new MutationObserver(function(){setTimeout(clean,50);}).observe(document.documentElement,{childList:true,subtree:true});
+  }
+  setInterval(clean,1500);
+})();
+<\/script>
+</body></html>`;
 }
 
 function loadYT(key){
