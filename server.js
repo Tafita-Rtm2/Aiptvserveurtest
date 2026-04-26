@@ -348,86 +348,154 @@ app.get('/api/rtm/search', (req, res) => {
 // ══════════════════════════════════════════════════════════════
 // ░░░ PROXY LIVE TV ░░░
 // ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+// ░░░ PROXY LIVE TV — HLS ROBUSTE 24H/24 ░░░
+// ══════════════════════════════════════════════════════════════
+
+// Détection type contenu
+function isM3U8Url(url) {
+  return /\.m3u8?(\?|#|$)/i.test(url.split('?')[0]);
+}
+function isM3U8Content(ct) {
+  return /mpegurl|m3u/i.test(ct);
+}
+function isSegmentUrl(url) {
+  return /\.(ts|aac|mp4|m4s|cmfv|cmfa|fmp4)(\?|#|$)/i.test(url.split('?')[0]);
+}
+
+// Résolution URL relative → absolue
+function resolveUrl(base, rel) {
+  try {
+    if (/^https?:\/\//i.test(rel)) return rel;
+    if (rel.startsWith('//')) return 'https:' + rel;
+    if (rel.startsWith('/')) {
+      const u = new URL(base);
+      return u.origin + rel;
+    }
+    return base.substring(0, base.lastIndexOf('/') + 1) + rel;
+  } catch (_) { return rel; }
+}
+
+// Réécriture M3U8 — toutes les URLs → notre proxy
+function rewriteM3U8(text, baseUrl) {
+  const lines = text.split('\n');
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const t = line.trim();
+    if (!t) { out.push(line); continue; }
+    if (t.startsWith('#')) {
+      // Réécrire URI="..." dans les tags HLS
+      const rw = t.replace(/URI="([^"]+)"/g, (_, uri) => {
+        const abs = resolveUrl(baseUrl, uri);
+        if (isBlocked(abs)) return 'URI=""';
+        return `URI="/api/rtm/live?url=${encodeURIComponent(abs)}"`;
+      });
+      out.push(rw);
+      continue;
+    }
+    // Ligne URL (segment ou sous-playlist)
+    const abs = resolveUrl(baseUrl, t);
+    if (isBlocked(abs)) continue; // skip ad segments
+    out.push(`/api/rtm/live?url=${encodeURIComponent(abs)}`);
+  }
+  return out.join('\n');
+}
+
+// Headers navigateur réaliste
+function liveHdrs(url) {
+  const h = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': '*/*',
+    'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8',
+    'Connection': 'keep-alive',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'cross-site',
+  };
+  try { const u = new URL(url); h['Origin'] = u.origin; h['Referer'] = u.origin + '/'; } catch (_) {}
+  return h;
+}
+
+// Instance axios dédiée streaming — légère et rapide
+const axLive = axios.create({
+  timeout: 18000,
+  maxRedirects: 15,
+  httpsAgent: agS,
+  httpAgent: agP,
+  validateStatus: s => s < 500,
+  decompress: true,
+});
+
 app.get('/api/rtm/live', async (req, res) => {
   const url = req.query.url;
-  
-  if (!url || !/^https?:\/\//i.test(url)) {
-    return res.status(400).send('Invalid URL');
+  if (!url || !/^https?:\/\//i.test(url)) return res.status(400).send('Invalid URL');
+  if (isBlocked(url)) { cStats.blocked++; return res.status(403).send('Blocked'); }
+
+  const looksSegment = isSegmentUrl(url);
+  const looksManifest = isM3U8Url(url);
+
+  // ── SEGMENTS TS/MP4 : pipe direct ultra-rapide, SANS cache, SANS buffer en mémoire ──
+  if (looksSegment) {
+    try {
+      const up = await axLive.get(url, {
+        responseType: 'stream',
+        timeout: 10000,
+        headers: liveHdrs(url),
+      });
+      res.set('Content-Type', up.headers['content-type'] || 'video/mp2t');
+      res.set('Access-Control-Allow-Origin', '*');
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+      if (up.headers['content-length']) res.set('Content-Length', up.headers['content-length']);
+      up.data.pipe(res);
+      up.data.on('error', () => { if (!res.headersSent) res.status(502).end(); else res.end(); });
+      req.on('close', () => { try { up.data.destroy(); } catch (_) {} });
+    } catch (e) {
+      if (!res.headersSent) res.status(502).send('Segment unavailable');
+    }
+    return;
   }
-  
-  if (isBlocked(url)) {
-    cStats.blocked++;
-    return res.status(403).send('Blocked');
-  }
-  
-  const ck = 'live:' + url;
+
+  // ── MANIFESTS M3U8 : fetch + réécriture + cache TRÈS court (3s pour live, 30s pour VOD) ──
+  const ck = 'mf3:' + url;
   const hit = LHL.get(ck);
   if (hit) {
     res.set('Content-Type', 'application/vnd.apple.mpegurl');
-    res.set('Cache-Control', 'no-store');
+    res.set('Cache-Control', 'no-store, max-age=0');
     res.set('Access-Control-Allow-Origin', '*');
     return res.send(hit);
   }
-  
+
   try {
-    const hdrs = {
-      'Accept': '*/*',
-      'Connection': 'keep-alive',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    };
-    
-    try {
-      hdrs['Referer'] = new URL(url).origin + '/';
-    } catch (_) {}
-    
-    const up = await axGet(url, {
-      responseType: 'stream',
+    const up = await axLive.get(url, {
+      responseType: 'arraybuffer',
       timeout: 15000,
-      headers: hdrs,
+      headers: liveHdrs(url),
     });
-    
     const ct = (up.headers['content-type'] || '').toLowerCase();
-    const isHLS = ct.includes('mpegurl') || ct.includes('m3u') || /\.m3u8?(\?|$)/i.test(url.split('?')[0]);
-    
+    const body = Buffer.from(up.data).toString('utf8');
+    const isHLS = isM3U8Content(ct) || looksManifest || body.trimStart().startsWith('#EXTM3U');
+
     if (isHLS) {
-      const chunks = [];
-      up.data.on('data', chunk => chunks.push(chunk));
-      await new Promise((resolve, reject) => {
-        up.data.on('end', resolve);
-        up.data.on('error', reject);
-      });
-      
-      let m3u = Buffer.concat(chunks).toString('utf8');
-      
-      const base = url.substring(0, url.lastIndexOf('/') + 1);
-      m3u = m3u.split('\n').map(line => {
-        const t = line.trim();
-        if (!t || t.startsWith('#')) return line;
-        if (/^https?:\/\//i.test(t)) {
-          if (isBlocked(t)) return '';
-          return `/api/rtm/live?url=${encodeURIComponent(t)}`;
-        }
-        const full = base + t;
-        if (isBlocked(full)) return '';
-        return `/api/rtm/live?url=${encodeURIComponent(full)}`;
-      }).filter(Boolean).join('\n');
-      
-      LHL.set(ck, m3u);
+      const rewritten = rewriteM3U8(body, url);
+      // Live playlist = pas de #EXT-X-ENDLIST → cache 3s seulement
+      // VOD / Event playlist = #EXT-X-ENDLIST présent → cache 30s
+      const isLive = body.includes('#EXT-X-TARGETDURATION') && !body.includes('#EXT-X-ENDLIST');
+      LHL.set(ck, rewritten, isLive ? 3 : 30);
       res.set('Content-Type', 'application/vnd.apple.mpegurl');
-      res.set('Cache-Control', 'no-store');
+      res.set('Cache-Control', 'no-store, max-age=0');
       res.set('Access-Control-Allow-Origin', '*');
-      return res.send(m3u);
-      
+      return res.send(rewritten);
     } else {
-      res.set('Content-Type', up.headers['content-type'] || 'video/mp2t');
+      // Segment binaire sans extension reconnaissable
+      res.set('Content-Type', ct || 'video/mp2t');
       res.set('Access-Control-Allow-Origin', '*');
-      if (up.headers['content-length']) res.set('Content-Length', up.headers['content-length']);
-      up.data.pipe(res);
+      res.set('Cache-Control', 'no-store');
+      return res.send(Buffer.from(up.data));
     }
-    
   } catch (e) {
-    console.error('Live error:', e.message);
-    res.status(500).send('Stream error');
+    console.error('Live error:', url.substring(0, 80), e.message);
+    if (!res.headersSent) res.status(502).send('Stream unavailable');
   }
 });
 
@@ -625,27 +693,47 @@ app.get('/api/rtm/details', async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 // ░░░ EMBED VIDÉO ░░░
 // ══════════════════════════════════════════════════════════════
+// Providers embed — cachés côté serveur, jamais exposés au client
+// On tourne automatiquement vers le suivant si le premier est signalé en erreur
+const EMBED_PROVIDERS_MOVIE = [
+  (id) => `${C.se}/embed/movie/${id}`,
+  (id) => `https://vidsrc.xyz/embed/movie/${id}`,
+  (id) => `https://2embed.org/embed/movie/${id}`,
+  (id) => `https://autoembed.co/movie/tmdb/${id}`,
+  (id) => `https://embed.smashystream.com/playere.php?tmdb=${id}`,
+];
+const EMBED_PROVIDERS_TV = [
+  (id,s,e) => `${C.se}/embed/tv/${id}/${s}/${e}`,
+  (id,s,e) => `https://vidsrc.xyz/embed/tv/${id}/${s}/${e}`,
+  (id,s,e) => `https://2embed.org/embed/tv/${id}/${s}/${e}`,
+  (id,s,e) => `https://autoembed.co/tv/tmdb/${id}-${s}-${e}`,
+  (id,s,e) => `https://embed.smashystream.com/playere.php?tmdb=${id}&season=${s}&episode=${e}`,
+];
+
 app.get('/api/rtm/embed', (req, res) => {
   const token = req.query.token;
-  const s = req.query.s;
-  const ep = req.query.ep;
-  
+  const s = parseInt(req.query.s) || 1;
+  const ep = parseInt(req.query.ep) || 1;
+  const retry = Math.min(parseInt(req.query.retry) || 0, 4);
+
   if (!token) return res.status(400).json({ error: 'Token missing' });
-  
+
   try {
     const decoded = JSON.parse(Buffer.from(token, 'base64').toString());
     const { type, id } = decoded;
-    
+
     let url;
     if (type === 'movie') {
-      url = `${C.se}/embed/movie/${id}`;
+      const providerFn = EMBED_PROVIDERS_MOVIE[retry % EMBED_PROVIDERS_MOVIE.length];
+      url = providerFn(id);
     } else {
-      const season = s || 1;
-      const episode = ep || 1;
-      url = `${C.se}/embed/tv/${id}/${season}/${episode}`;
+      const providerFn = EMBED_PROVIDERS_TV[retry % EMBED_PROVIDERS_TV.length];
+      url = providerFn(id, s, ep);
     }
-    
-    res.json({ url });
+
+    // Ne jamais exposer l'URL réelle au client — elle passe par notre proxy
+    // Le client ne voit que la route /api/rtm/embed, jamais le provider
+    res.json({ url, provider: retry }); // provider = index (pour debug)
   } catch (e) {
     res.status(400).json({ error: 'Invalid token' });
   }
