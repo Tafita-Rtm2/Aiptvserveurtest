@@ -42,7 +42,7 @@ const client = axios.create({
   maxRedirects: 10,
 });
 
-// ════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 // ░░░ CACHE DATA CENTER FRONTEND ░░░
 // ═══════════════════════════════════════════════════════════════
 const L1 = new NodeCache({ stdTTL: 300, checkperiod: 30, useClones: false });    // 5min
@@ -306,35 +306,17 @@ app.get('/api/rtm/*', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 // ░░░ PAGES HTML ░░░
 // ═══════════════════════════════════════════════════════════════
-// ═══════════════════════════════════════════════════════════════
-// ░░░ PAGES HTML (DOSSIER PUBLIC) ░░░
-// ═══════════════════════════════════════════════════════════════
+// Utiliser le dossier "public" pour les fichiers
+app.use(express.static(path.join(__dirname, 'public')));
 
-// 1. Configurer le dossier public pour les fichiers statiques (CSS, JS, images)
-app.use(express.static(path.join(__dirname, 'public'), {
-  maxAge: '1h',
-  etag: true,
-  index: false,
-}));
-
-// 2. Route pour l'accueil
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// 3. Route pour le streaming
 app.get('/streaming', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'streaming.html'));
 });
 
-// 4. Gestion du 404 et redirection vers index
-app.get('*', (req, res) => {
-  if (req.path.includes('.') || req.path.startsWith('/api')) {
-    return res.status(404).send('Not Found');
-  }
-  // Pointe aussi vers le fichier dans public
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
 
 // ═══════════════════════════════════════════════════════════════
 // ░░░ DÉMARRAGE SERVEUR ░░░
