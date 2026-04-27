@@ -125,6 +125,10 @@ app.use((req, res, next) => {
   res.set('Access-Control-Allow-Headers', 'Range,Content-Type,Authorization');
   res.set('Access-Control-Expose-Headers', 'Content-Range,Content-Length,Accept-Ranges');
   res.set('X-Powered-By', 'VideoVerse-Frontend');
+
+   // Content Security Policy
+   res.set('Content-Security-Policy', "default-src 'self' 'unsafe-inline' 'unsafe-eval' https: data: blob:; frame-src https: blob:; img-src 'self' https: data: blob:; media-src 'self' https: data: blob:;");
+
   next();
 });
 
@@ -185,12 +189,13 @@ app.get('/api/rtm/img', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 app.get('/api/rtm/live', async (req, res) => {
   const url = req.query.url;
-  if (!url) return res.status(400).end();
+  const id = req.query.id;
+  if (!url && !id) return res.status(400).end();
   
-  if (isAd(url)) return res.status(403).end();
+  if (url && isAd(url)) return res.status(403).end();
   
   const go = () => client.get(`${BACKEND_URL}/api/rtm/live`, {
-    params: { url, auth: AUTH_KEY },
+    params: { url, id, auth: AUTH_KEY },
     headers: authHeaders(),
     responseType: 'stream',
     timeout: 20000,
@@ -243,6 +248,12 @@ app.get('/api/rtm/embed', async (req, res) => {
     });
     
     const data = decode(r.data, r.headers);
+    // Décodage de l'URL obscurcie par le backend
+    if (data.url && !data.url.startsWith('http')) {
+      try {
+        data.url = Buffer.from(data.url, 'base64').toString('utf8');
+      } catch (_) {}
+    }
     res.json(data);
     
   } catch (e) {
