@@ -1,0 +1,17 @@
+🔗 Backend URL: https://tafita1206-kkiakkaikaccskgdebkufevnkagcs.hf.space
+🔐 Auth Key: rtm_secret...
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🌐 VideoVerse FRONTEND
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📡 Server  : http://localhost:7860
+🔗 Backend : https://tafita1206-kkiakkaikaccskgdebkufevnkagcs.hf.space
+🛡️  Security: URLs cachées du client
+🚀 Pages   : / et /streaming
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔥 Pre-warming cache...
+✗ Prewarm: /api/rtm/tv/popular Request failed with status code 403
+✗ Prewarm: /api/rtm/movies/trending Request failed with status code 403
+✗ Prewarm: /api/rtm/channels?page=1&limit=500 Request failed with status code 403
+✗ Prewarm: /api/rtm/tv/trending Request failed with status code 403
+✗ Prewarm: /api/rtm/movies/popular Request failed with status code 403
+🚀 Prewarm done — L1: 0 L2: 0
