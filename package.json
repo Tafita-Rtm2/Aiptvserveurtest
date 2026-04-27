@@ -4,7 +4,7 @@
   "description": "Secure RTM Vault for StreamVerse",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "node server_back.js",
     "dev": "nodemon server.js"
   },
   "engines": {
