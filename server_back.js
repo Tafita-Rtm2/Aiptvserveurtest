@@ -201,6 +201,8 @@ app.use('/api/rtm', auth);
 // ══════════════════════════════════════════════════════════════
 // ░░░ PARSER M3U ULTRA-RAPIDE ░░░
 // ══════════════════════════════════════════════════════════════
+const CHANNEL_MAP = new Map();
+
 function parseM3U(text) {
   const lines = text.split('\n');
   const out = [];
@@ -233,6 +235,9 @@ function parseM3U(text) {
     } else if (line && !line.startsWith('#') && cur) {
       if (cur.name && /^https?:\/\//i.test(line)) {
         cur.url = line;
+        // Generate a unique and stable ID for the session
+        cur.id = crypto.createHash('md5').update(cur.name + cur.url).digest('hex').substring(0, 12);
+
         if (!isBlocked(line)) {
           out.push({ ...cur });
         } else {
@@ -248,24 +253,30 @@ function parseM3U(text) {
 
 function saveChannels(all) {
   const byC = {}, byG = {}, cs = new Set(), gs = new Set();
+  CHANNEL_MAP.clear();
   
-  for (const ch of all) {
-    const c = ch.country || 'XX';
-    const g = ch.group || 'Other';
-    (byC[c] = byC[c] || []).push(ch);
-    (byG[g] = byG[g] || []).push(ch);
+  const publicChannels = all.map(ch => {
+    CHANNEL_MAP.set(ch.id, ch.url);
+    const { url, ...rest } = ch;
+
+    const c = rest.country || 'XX';
+    const g = rest.group || 'Other';
+    (byC[c] = byC[c] || []).push(rest);
+    (byG[g] = byG[g] || []).push(rest);
     cs.add(c);
     gs.add(g);
-  }
+
+    return rest;
+  });
   
-  cSet('channels', all);
+  cSet('channels', publicChannels);
   cSet('byCountry', byC);
   cSet('byGroup', byG);
   cSet('countries', [...cs].sort((a, b) => a === 'MG' ? -1 : b === 'MG' ? 1 : a.localeCompare(b)));
   cSet('groups', [...gs].sort());
   cSet('lastUpdate', new Date().toISOString());
   
-  console.log(`✅ ${all.length} chaînes sauvegardées en cache`);
+  console.log(`✅ ${publicChannels.length} chaînes sauvegardées en cache (URLs masquées)`);
 }
 
 let _loading = false;
@@ -274,33 +285,47 @@ async function fetchIPTV() {
   _loading = true;
   
   try {
-    console.log('📡 Chargement IPTV depuis:', C.tv);
+    const urls = (process.env.RTM_TV || C.tv).split(',').map(u => u.trim()).filter(Boolean);
+    console.log(`📡 Chargement IPTV depuis ${urls.length} sources...`);
     
-    const response = await axGet(C.tv, {
-      timeout: 90000,
-      headers: {
-        'Accept': 'application/x-mpegURL, application/vnd.apple.mpegurl, */*',
-      },
+    let allChannels = [];
+    
+    for (const url of urls) {
+      try {
+        const response = await axGet(url, {
+          timeout: 60000,
+          headers: { 'Accept': 'application/x-mpegURL, application/vnd.apple.mpegurl, */*' }
+        });
+
+        if (response.status === 200) {
+          const channels = parseM3U(response.data);
+          allChannels = allChannels.concat(channels);
+          console.log(`✓ ${channels.length} chaînes depuis: ${url.substring(0, 50)}...`);
+        }
+      } catch (err) {
+        console.error(`✗ Échec source: ${url.substring(0, 50)}... - ${err.message}`);
+      }
+    }
+
+    // Déduplication par URL
+    const seen = new Set();
+    const unique = allChannels.filter(ch => {
+      if (seen.has(ch.url)) return false;
+      seen.add(ch.url);
+      return true;
     });
     
-    if (response.status !== 200) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    
-    const m3uText = response.data;
-    const channels = parseM3U(m3uText);
-    
-    channels.sort((a, b) => {
+    unique.sort((a, b) => {
       if (a.country === 'MG' && b.country !== 'MG') return -1;
       if (b.country === 'MG' && a.country !== 'MG') return 1;
-      return 0;
+      return a.name.localeCompare(b.name);
     });
     
-    saveChannels(channels);
-    console.log(`📺 ${channels.length} chaînes IPTV chargées avec succès!`);
+    saveChannels(unique);
+    console.log(`📺 Total: ${unique.length} chaînes IPTV chargées!`);
     
   } catch (e) {
-    console.error('❌ Erreur chargement IPTV:', e.message);
+    console.error('❌ Erreur globale chargement IPTV:', e.message);
   } finally {
     _loading = false;
   }
@@ -376,6 +401,15 @@ function resolveUrl(base, rel) {
   } catch (_) { return rel; }
 }
 
+// Token pour masquer les URLs de segments (expire après 2h)
+const SEG_CACHE = new NodeCache({ stdTTL: 7200 });
+
+function getSegId(url) {
+  const id = crypto.createHash('md5').update(url).digest('hex').substring(0, 16);
+  SEG_CACHE.set(id, url);
+  return id;
+}
+
 // Réécriture M3U8 — toutes les URLs → notre proxy
 function rewriteM3U8(text, baseUrl) {
   const lines = text.split('\n');
@@ -389,7 +423,7 @@ function rewriteM3U8(text, baseUrl) {
       const rw = t.replace(/URI="([^"]+)"/g, (_, uri) => {
         const abs = resolveUrl(baseUrl, uri);
         if (isBlocked(abs)) return 'URI=""';
-        return `URI="/api/rtm/live?url=${encodeURIComponent(abs)}"`;
+        return `URI="/api/rtm/live?sid=${getSegId(abs)}"`;
       });
       out.push(rw);
       continue;
@@ -397,7 +431,7 @@ function rewriteM3U8(text, baseUrl) {
     // Ligne URL (segment ou sous-playlist)
     const abs = resolveUrl(baseUrl, t);
     if (isBlocked(abs)) continue; // skip ad segments
-    out.push(`/api/rtm/live?url=${encodeURIComponent(abs)}`);
+    out.push(`/api/rtm/live?sid=${getSegId(abs)}`);
   }
   return out.join('\n');
 }
@@ -428,74 +462,62 @@ const axLive = axios.create({
 });
 
 app.get('/api/rtm/live', async (req, res) => {
-  const url = req.query.url;
-  if (!url || !/^https?:\/\//i.test(url)) return res.status(400).send('Invalid URL');
-  if (isBlocked(url)) { cStats.blocked++; return res.status(403).send('Blocked'); }
+  let url = req.query.url;
+  const id = req.query.id;
+  const sid = req.query.sid;
 
-  const looksSegment = isSegmentUrl(url);
-  const looksManifest = isM3U8Url(url);
-
-  // ── SEGMENTS TS/MP4 : pipe direct ultra-rapide, SANS cache, SANS buffer en mémoire ──
-  if (looksSegment) {
-    try {
-      const up = await axLive.get(url, {
-        responseType: 'stream',
-        timeout: 10000,
-        headers: liveHdrs(url),
-      });
-      res.set('Content-Type', up.headers['content-type'] || 'video/mp2t');
-      res.set('Access-Control-Allow-Origin', '*');
-      res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-      if (up.headers['content-length']) res.set('Content-Length', up.headers['content-length']);
-      up.data.pipe(res);
-      up.data.on('error', () => { if (!res.headersSent) res.status(502).end(); else res.end(); });
-      req.on('close', () => { try { up.data.destroy(); } catch (_) {} });
-    } catch (e) {
-      if (!res.headersSent) res.status(502).send('Segment unavailable');
-    }
-    return;
+  if (id) {
+    url = CHANNEL_MAP.get(id);
+  } else if (sid) {
+    url = SEG_CACHE.get(sid);
   }
 
-  // ── MANIFESTS M3U8 : fetch + réécriture + cache TRÈS court (3s pour live, 30s pour VOD) ──
+  if (!url || !/^https?:\/\//i.test(url)) return res.status(400).send('Invalid Reference');
+  if (isBlocked(url)) return res.status(403).send('Blocked');
+
+  // Cache manifest check
   const ck = 'mf3:' + url;
   const hit = LHL.get(ck);
   if (hit) {
     res.set('Content-Type', 'application/vnd.apple.mpegurl');
-    res.set('Cache-Control', 'no-store, max-age=0');
     res.set('Access-Control-Allow-Origin', '*');
     return res.send(hit);
   }
 
   try {
     const up = await axLive.get(url, {
-      responseType: 'arraybuffer',
+      responseType: 'stream',
       timeout: 15000,
       headers: liveHdrs(url),
     });
-    const ct = (up.headers['content-type'] || '').toLowerCase();
-    const body = Buffer.from(up.data).toString('utf8');
-    const isHLS = isM3U8Content(ct) || looksManifest || body.trimStart().startsWith('#EXTM3U');
 
-    if (isHLS) {
-      const rewritten = rewriteM3U8(body, url);
-      // Live playlist = pas de #EXT-X-ENDLIST → cache 3s seulement
-      // VOD / Event playlist = #EXT-X-ENDLIST présent → cache 30s
-      const isLive = body.includes('#EXT-X-TARGETDURATION') && !body.includes('#EXT-X-ENDLIST');
-      LHL.set(ck, rewritten, isLive ? 3 : 30);
-      res.set('Content-Type', 'application/vnd.apple.mpegurl');
-      res.set('Cache-Control', 'no-store, max-age=0');
-      res.set('Access-Control-Allow-Origin', '*');
-      return res.send(rewritten);
+    const ct = (up.headers['content-type'] || '').toLowerCase();
+    const isManifest = isM3U8Content(ct) || isM3U8Url(url);
+
+    if (isManifest) {
+      // Buffer full manifest to rewrite it
+      let body = '';
+      up.data.on('data', chunk => { body += chunk.toString('utf8'); });
+      up.data.on('end', () => {
+        const rewritten = rewriteM3U8(body, url);
+        const isLive = body.includes('#EXT-X-TARGETDURATION') && !body.includes('#EXT-X-ENDLIST');
+        LHL.set(ck, rewritten, isLive ? 3 : 30);
+        res.set('Content-Type', 'application/vnd.apple.mpegurl');
+        res.set('Access-Control-Allow-Origin', '*');
+        res.send(rewritten);
+      });
+      up.data.on('error', () => res.status(502).end());
     } else {
-      // Segment binaire sans extension reconnaissable
+      // TS Segment or direct MP4 stream - Pipe directly
       res.set('Content-Type', ct || 'video/mp2t');
       res.set('Access-Control-Allow-Origin', '*');
-      res.set('Cache-Control', 'no-store');
-      return res.send(Buffer.from(up.data));
+      if (up.headers['content-length']) res.set('Content-Length', up.headers['content-length']);
+      up.data.pipe(res);
+      up.data.on('error', () => res.end());
+      req.on('close', () => up.data.destroy());
     }
   } catch (e) {
-    console.error('Live error:', url.substring(0, 80), e.message);
-    if (!res.headersSent) res.status(502).send('Stream unavailable');
+    if (!res.headersSent) res.status(502).send('Error');
   }
 });
 

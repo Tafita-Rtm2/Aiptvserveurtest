@@ -1,0 +1,5 @@
+node_modules/
+backend.log
+fond_heberge_huggingface/frontend.log
+backend_test.log
+fond_heberge_huggingface/frontend_test.log
