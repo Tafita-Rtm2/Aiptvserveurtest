@@ -8,7 +8,7 @@ const S = {
   filtered: [],
   events: [],
   countries: [],
-  ps: 100,      // Page size
+  ps: 120,      // Page size
   dispIdx: 0,   // Display index
   view: 'all',  // current view (all, mg, sport, etc)
   country: null,
@@ -21,23 +21,26 @@ const S = {
   scrollLoading: false
 };
 
-const F = {
-  'MG':'🇲🇬','FR':'🇫🇷','RE':'🇷🇪','MU':'🇲🇺','US':'🇺🇸','GB':'🇬🇧',
-  'ES':'🇪🇸','IT':'🇮🇹','DE':'🇩🇪','BR':'🇧🇷','CA':'🇨🇦','JP':'🇯🇵',
-  'CN':'🇨🇳','IN':'🇮🇳','AR':'🇦🇷','AU':'🇦🇺','BE':'🇧🇪','CH':'🇨🇭',
-};
+const F={MG:'🇲🇬',FR:'🇫🇷',US:'🇺🇸',GB:'🇬🇧',DE:'🇩🇪',IT:'🇮🇹',ES:'🇪🇸',PT:'🇵🇹',
+  RU:'🇷🇺',CN:'🇨🇳',JP:'🇯🇵',KR:'🇰🇷',IN:'🇮🇳',BR:'🇧🇷',AR:'🇦🇷',MX:'🇲🇽',
+  SA:'🇸🇦',AE:'🇦🇪',EG:'🇪🇬',MA:'🇲🇦',TN:'🇹🇳',DZ:'🇩🇿',SN:'🇸🇳',NG:'🇳🇬',
+  ZA:'🇿🇦',KE:'🇰🇪',MU:'🇲🇺',RE:'🇷🇪',CM:'🇨🇲',CI:'🇨🇮',TR:'🇹🇷',NL:'🇳🇱',
+  BE:'🇧🇪',CH:'🇨🇭',AT:'🇦🇹',SE:'🇸🇪',DK:'🇩🇰',FI:'🇫🇮',GR:'🇬🇷',UA:'🇺🇦',
+  RO:'🇷🇴',CA:'🇨🇦',AU:'🇦🇺',ID:'🇮🇩',MY:'🇲🇾',TH:'🇹🇭',VN:'🇻🇳',PH:'🇵🇭',
+  PK:'🇵🇰',IR:'🇮🇷',IQ:'🇮🇶',SY:'🇸🇾',KW:'🇰🇼',QA:'🇶🇦',IL:'🇮🇱',KM:'🇰🇲',XX:'🌐'};
 
-const CN = {
-  'MG':'Madagascar','FR':'France','RE':'Réunion','MU':'Maurice','US':'USA','GB':'UK',
-  'ES':'Espagne','IT':'Italie','DE':'Allemagne','BR':'Brésil','CA':'Canada',
-};
+const CN={MG:'Madagascar',FR:'France',US:'États-Unis',GB:'Royaume-Uni',DE:'Allemagne',
+  IT:'Italie',ES:'Espagne',PT:'Portugal',RU:'Russie',CN:'Chine',JP:'Japon',KR:'Corée',
+  IN:'Inde',BR:'Brésil',AR:'Argentine',MX:'Mexique',SA:'Arabie Saoudite',AE:'Émirats',
+  EG:'Égypte',MA:'Maroc',TN:'Tunisie',DZ:'Algérie',SN:'Sénégal',NG:'Nigéria',
+  ZA:'Afrique du Sud',KE:'Kenya',MU:'Maurice',RE:'Réunion',CM:'Cameroun',
+  CI:"Côte d'Ivoire",TR:'Turquie',NL:'Pays-Bas',BE:'Belgique',CH:'Suisse',
+  CA:'Canada',AU:'Australie',KM:'Comores'};
 
-const ICON = {
-  sport:'sports_soccer', news:'newspaper', kids:'child_care', movies:'theaters',
-  music:'music_note', radio:'radio', nature:'forest', religion:'church', tv:'live_tv'
-};
+const ICON={sport:'sports_soccer',news:'newspaper',kids:'child_care',movies:'theaters',
+  music:'music_note',radio:'radio',nature:'forest',religion:'church',tv:'live_tv'};
 
-const EV = ['champions','premier league','ligue 1','serie a','bundesliga','la liga',
+const EV=['champions','premier league','ligue 1','serie a','bundesliga','la liga',
   'copa','world cup','can ','afcon','olympic','bein','eurosport','supersport'];
 
 // ══════════════════════════════════════════════════════════════
@@ -77,6 +80,12 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 async function api(p) {
   const r = await fetch(p);
   if (!r.ok) throw new Error('HTTP ' + r.status);
+  const ct = r.headers.get('Content-Type') || '';
+  const enc = r.headers.get('X-RTM-Enc');
+  if (enc === '1' || ct.includes('x-rtm')) {
+    const t = await r.text();
+    try { return JSON.parse(atob(t)); } catch { return JSON.parse(t); }
+  }
   return r.json();
 }
 
@@ -112,16 +121,20 @@ async function boot() {
 
   prog(50, 'Récupération...');
   try {
-    const res = await api('/api/rtm/channels?limit=50000');
-    S.all = res.channels || [];
+    let all = [], p = 1, pages = 1;
+    do {
+      const d = await api('/api/rtm/channels?page=' + p + '&limit=5000');
+      all = all.concat(d.channels || []);
+      pages = d.pages || 1;
+      prog(50 + Math.round(p / pages * 42), all.length.toLocaleString() + '...');
+      p++;
+    } while (p <= pages);
 
+    S.all = all;
     S.events = S.all.filter(ch => EV.some(k => ((ch.name || '') + ' ' + (ch.group || '')).toLowerCase().includes(k)));
     const cs = new Set();
     S.all.forEach(c => { if (c.country) cs.add(c.country); });
     S.countries = [...cs].sort((a, b) => a === 'MG' ? -1 : b === 'MG' ? 1 : a.localeCompare(b));
-
-    const resC = await api('/api/rtm/countries');
-    S.countries = resC.countries || S.countries;
 
     document.getElementById('totC').textContent = S.all.length.toLocaleString();
     buildCL();
@@ -211,7 +224,7 @@ function applyFilters() {
   if (S.group) ch = ch.filter(c => c.group === S.group);
 
   if (q) {
-    ch = ch.filter(c => (c.name || '').toLowerCase().includes(q) || (c.group || '').toLowerCase().includes(q));
+    ch = ch.filter(c => (c.name || '').toLowerCase().includes(q) || (c.group || '').toLowerCase().includes(q) || (c.country || '').toLowerCase().includes(q));
   }
 
   S.filtered = ch;
@@ -343,11 +356,13 @@ function setupInfiniteScroll() {
 // ══════════════════════════════════════════════════════════════
 let hls = null;
 let retryCount = 0;
-const MAX_RETRIES = 5;
+const MAX_RETRIES = 10;
+let _wd = null;
 
 function playTV(ch) {
   S.currentCh = ch;
   retryCount = 0;
+  clearTimeout(_wd);
 
   document.querySelectorAll('.card').forEach(c => c.classList.toggle('now', c.dataset.id === ch.id));
 
@@ -380,17 +395,21 @@ function loadStream(id) {
 
   if (Hls.isSupported()) {
     hls = new Hls({
-      maxBufferLength: 15,
+      maxBufferLength: 20,
+      maxMaxBufferLength: 60,
       maxBufferSize: 30 * 1000 * 1000,
-      startLevel: 0,
+      startLevel: -1,
       capLevelToPlayerSize: true,
       enableWorker: true,
+      nudgeMaxRetry: 5,
+      liveSyncDurationCount: 3,
     });
     hls.loadSource(src);
     hls.attachMedia(v);
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
       v.play().catch(() => {});
       spinShow(false);
+      _wdog(v, id);
     });
     hls.on(Hls.Events.ERROR, (e, data) => {
       if (data.fatal) {
@@ -409,6 +428,28 @@ function loadStream(id) {
     v.play().catch(() => {});
     spinShow(false);
   }
+}
+
+function _wdog(v, id) {
+  clearTimeout(_wd);
+  let lastTime = -1;
+  let stuckCount = 0;
+  function chk() {
+    if (!S.currentCh || S.currentCh.id !== id) return;
+    if (v.paused || v.ended) return;
+    if (v.currentTime === lastTime) {
+      if (++stuckCount >= 5 && hls) {
+        stuckCount = 0;
+        hls.recoverMediaError();
+        v.play().catch(() => {});
+      }
+    } else {
+      stuckCount = 0;
+    }
+    lastTime = v.currentTime;
+    _wd = setTimeout(chk, 2000);
+  }
+  _wd = setTimeout(chk, 5000);
 }
 
 function spinShow(on, msg = '') {

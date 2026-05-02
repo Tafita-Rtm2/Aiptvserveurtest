@@ -285,33 +285,47 @@ async function fetchIPTV() {
   _loading = true;
   
   try {
-    console.log('📡 Chargement IPTV depuis:', C.tv);
+    const urls = (process.env.RTM_TV || C.tv).split(',').map(u => u.trim()).filter(Boolean);
+    console.log(`📡 Chargement IPTV depuis ${urls.length} sources...`);
     
-    const response = await axGet(C.tv, {
-      timeout: 90000,
-      headers: {
-        'Accept': 'application/x-mpegURL, application/vnd.apple.mpegurl, */*',
-      },
+    let allChannels = [];
+    
+    for (const url of urls) {
+      try {
+        const response = await axGet(url, {
+          timeout: 60000,
+          headers: { 'Accept': 'application/x-mpegURL, application/vnd.apple.mpegurl, */*' }
+        });
+
+        if (response.status === 200) {
+          const channels = parseM3U(response.data);
+          allChannels = allChannels.concat(channels);
+          console.log(`✓ ${channels.length} chaînes depuis: ${url.substring(0, 50)}...`);
+        }
+      } catch (err) {
+        console.error(`✗ Échec source: ${url.substring(0, 50)}... - ${err.message}`);
+      }
+    }
+
+    // Déduplication par URL
+    const seen = new Set();
+    const unique = allChannels.filter(ch => {
+      if (seen.has(ch.url)) return false;
+      seen.add(ch.url);
+      return true;
     });
     
-    if (response.status !== 200) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    
-    const m3uText = response.data;
-    const channels = parseM3U(m3uText);
-    
-    channels.sort((a, b) => {
+    unique.sort((a, b) => {
       if (a.country === 'MG' && b.country !== 'MG') return -1;
       if (b.country === 'MG' && a.country !== 'MG') return 1;
-      return 0;
+      return a.name.localeCompare(b.name);
     });
     
-    saveChannels(channels);
-    console.log(`📺 ${channels.length} chaînes IPTV chargées avec succès!`);
+    saveChannels(unique);
+    console.log(`📺 Total: ${unique.length} chaînes IPTV chargées!`);
     
   } catch (e) {
-    console.error('❌ Erreur chargement IPTV:', e.message);
+    console.error('❌ Erreur globale chargement IPTV:', e.message);
   } finally {
     _loading = false;
   }
@@ -458,73 +472,52 @@ app.get('/api/rtm/live', async (req, res) => {
     url = SEG_CACHE.get(sid);
   }
 
-  if (!url || !/^https?:\/\//i.test(url)) return res.status(400).send('Invalid Stream Reference');
-  if (isBlocked(url)) { cStats.blocked++; return res.status(403).send('Blocked'); }
+  if (!url || !/^https?:\/\//i.test(url)) return res.status(400).send('Invalid Reference');
+  if (isBlocked(url)) return res.status(403).send('Blocked');
 
-  const looksSegment = isSegmentUrl(url);
-  const looksManifest = isM3U8Url(url);
-
-  // ── SEGMENTS TS/MP4 : pipe direct ultra-rapide, SANS cache, SANS buffer en mémoire ──
-  if (looksSegment) {
-    try {
-      const up = await axLive.get(url, {
-        responseType: 'stream',
-        timeout: 10000,
-        headers: liveHdrs(url),
-      });
-      res.set('Content-Type', up.headers['content-type'] || 'video/mp2t');
-      res.set('Access-Control-Allow-Origin', '*');
-      res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-      if (up.headers['content-length']) res.set('Content-Length', up.headers['content-length']);
-      up.data.pipe(res);
-      up.data.on('error', () => { if (!res.headersSent) res.status(502).end(); else res.end(); });
-      req.on('close', () => { try { up.data.destroy(); } catch (_) {} });
-    } catch (e) {
-      if (!res.headersSent) res.status(502).send('Segment unavailable');
-    }
-    return;
-  }
-
-  // ── MANIFESTS M3U8 : fetch + réécriture + cache TRÈS court (3s pour live, 30s pour VOD) ──
+  // Cache manifest check
   const ck = 'mf3:' + url;
   const hit = LHL.get(ck);
   if (hit) {
     res.set('Content-Type', 'application/vnd.apple.mpegurl');
-    res.set('Cache-Control', 'no-store, max-age=0');
     res.set('Access-Control-Allow-Origin', '*');
     return res.send(hit);
   }
 
   try {
     const up = await axLive.get(url, {
-      responseType: 'arraybuffer',
+      responseType: 'stream',
       timeout: 15000,
       headers: liveHdrs(url),
     });
-    const ct = (up.headers['content-type'] || '').toLowerCase();
-    const body = Buffer.from(up.data).toString('utf8');
-    const isHLS = isM3U8Content(ct) || looksManifest || body.trimStart().startsWith('#EXTM3U');
 
-    if (isHLS) {
-      const rewritten = rewriteM3U8(body, url);
-      // Live playlist = pas de #EXT-X-ENDLIST → cache 3s seulement
-      // VOD / Event playlist = #EXT-X-ENDLIST présent → cache 30s
-      const isLive = body.includes('#EXT-X-TARGETDURATION') && !body.includes('#EXT-X-ENDLIST');
-      LHL.set(ck, rewritten, isLive ? 3 : 30);
-      res.set('Content-Type', 'application/vnd.apple.mpegurl');
-      res.set('Cache-Control', 'no-store, max-age=0');
-      res.set('Access-Control-Allow-Origin', '*');
-      return res.send(rewritten);
+    const ct = (up.headers['content-type'] || '').toLowerCase();
+    const isManifest = isM3U8Content(ct) || isM3U8Url(url);
+
+    if (isManifest) {
+      // Buffer full manifest to rewrite it
+      let body = '';
+      up.data.on('data', chunk => { body += chunk.toString('utf8'); });
+      up.data.on('end', () => {
+        const rewritten = rewriteM3U8(body, url);
+        const isLive = body.includes('#EXT-X-TARGETDURATION') && !body.includes('#EXT-X-ENDLIST');
+        LHL.set(ck, rewritten, isLive ? 3 : 30);
+        res.set('Content-Type', 'application/vnd.apple.mpegurl');
+        res.set('Access-Control-Allow-Origin', '*');
+        res.send(rewritten);
+      });
+      up.data.on('error', () => res.status(502).end());
     } else {
-      // Segment binaire sans extension reconnaissable
+      // TS Segment or direct MP4 stream - Pipe directly
       res.set('Content-Type', ct || 'video/mp2t');
       res.set('Access-Control-Allow-Origin', '*');
-      res.set('Cache-Control', 'no-store');
-      return res.send(Buffer.from(up.data));
+      if (up.headers['content-length']) res.set('Content-Length', up.headers['content-length']);
+      up.data.pipe(res);
+      up.data.on('error', () => res.end());
+      req.on('close', () => up.data.destroy());
     }
   } catch (e) {
-    console.error('Live error:', url.substring(0, 80), e.message);
-    if (!res.headersSent) res.status(502).send('Stream unavailable');
+    if (!res.headersSent) res.status(502).send('Error');
   }
 });
 
