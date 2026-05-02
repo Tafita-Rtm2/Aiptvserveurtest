@@ -502,6 +502,779 @@ body > div[style*="position:fixed"]:not(#boot):not(.modal-bg):not(#infoModal):no
   </div>
 </div>
 
-<script src="script_streaming.js"></script>
+<script>
+'use strict';
+
+// ══ SÉCURITÉ ════════════════════════════════════════════
+(function(){
+  document.addEventListener('keydown',function(e){
+    if(e.key==='F12'||(e.ctrlKey&&e.shiftKey&&['I','J','C','K','E','S'].includes(e.key))||(e.ctrlKey&&['U','P'].includes(e.key))){e.preventDefault();e.stopPropagation();return false;}
+  },true);
+  document.addEventListener('contextmenu',function(e){e.preventDefault();});
+  document.addEventListener('selectstart',function(e){e.preventDefault();});
+  var _tc=0;
+  setInterval(function(){var t=performance.now();debugger;if(performance.now()-t>100&&++_tc>2){
+    document.body.innerHTML='<div style="background:#080d1a;display:flex;height:100vh;align-items:center;justify-content:center;flex-direction:column;gap:16px;font-family:sans-serif"><div style="font-size:3rem">🔒</div><b style="color:#e8edf8;font-size:1.1rem">Page protégée</b><small style="color:#4a5578">Fermez les outils de développement</small></div>';
+  }},2000);
+})();
+
+// ══ AD BLOCKER COMPLET ═══════════════════════════════════
+const _AD=['doubleclick','googlesyndication','googletagmanager','google-analytics',
+  'adservice','pagead','adnxs','cdn4ads','popads','popcash','propellerads',
+  'trafficjunky','exoclick','juicyads','taboola','outbrain','mgid','revcontent',
+  'omnitagjs','prebid','adsense','bidvertiser','hilltopads','scorecardresearch',
+  'popunder','clickadu','monetag','adsterra','runative','adcash',
+  '1xbet','betway','casino','xbet','imasdk.googleapis','fwmrm.net','aniview',
+  'a-ads.com','trafficfactory','traffichunt','adspyglass','cpmstar',
+  'owneriq','undertone','yieldmo','sonobi','pubmatic','openx','appnexus',
+  'criteo','adsrvr','advertising.com','amazon-adsystem'];
+function _isAd(u){return typeof u==='string'&&_AD.some(d=>u.toLowerCase().includes(d));}
+// Bloquer XHR
+const origOpen=XMLHttpRequest.prototype.open;
+XMLHttpRequest.prototype.open=function(m,url,...a){if(_isAd(String(url)))return;return origOpen.call(this,m,url,...a);};
+// Bloquer fetch
+const origFetch=window.fetch;
+window.fetch=function(url,...a){if(_isAd(String(url)))return Promise.resolve(new Response('',{status:200}));return origFetch.call(this,url,...a);};
+// Bloquer TOUTES les popups
+window.open=function(){return null;};
+// Bloquer redirections
+window.addEventListener('beforeunload',function(e){e.preventDefault();e.returnValue='';},true);
+// Supprimer overlays pub dynamiques
+new MutationObserver(function(muts){
+  var SAFE={'boot':1,'modal':1,'infoModal':1,'vipModal':1,'dlModal':1};
+  for(var m of muts)for(var n of m.addedNodes){
+    if(n.nodeType!==1)continue;
+    var z=parseInt((n.style&&n.style.zIndex)||0)||parseInt(getComputedStyle(n).zIndex||0)||0;
+    var p=(n.style&&n.style.position)||getComputedStyle(n).position;
+    if(z>200&&(p==='fixed'||p==='absolute')&&!SAFE[n.id]){
+      var cls=String(n.className||'');
+      if(!cls.includes('modal')&&!cls.includes('pload')&&!n.querySelector('video,iframe')){n.style.display='none';n.style.pointerEvents='none';}
+    }
+  }
+}).observe(document.body,{childList:true,subtree:false});
+
+// ══ CONFIG ═══════════════════════════════════════════════
+const SERVER = window.RENDER_SERVER || "";
+// ══ CONFIG DATA CENTER — Qualité adaptative selon connexion
+const _conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+const _isSlowConn = _conn && (_conn.saveData || ['slow-2g','2g'].includes(_conn.effectiveType));
+// Taille image adaptée à la connexion
+const IMG_SIZE = _isSlowConn ? 'w185' : 'w342';
+const IMG_ORIG = _isSlowConn ? 'w500'  : 'original';
+const TMDB_BASE = 'https://image.themoviedb.org/t/p/';
+// Proxy image — envoie l'URL TMDB complète au backend
+function imgUrl(path, size) {
+  if(!path) return '';
+  return '/api/rtm/img?u=' + encodeURIComponent(TMDB_BASE + size + path);
+}
+if(_isSlowConn) console.log('[DC] Mode économie data activé:', _conn?.effectiveType);
+
+let currentTab='movies',heroItems=[],heroIdx=0,heroTimer=null;
+let currentItem=null,currentSeason=1,currentEp=1;
+let vipToken=sessionStorage.getItem('vt')||null;
+let pendingDlId=null,searchTimer;
+// Infinite scroll
+let infPage=1,infLoading=false,infDone=false,infType='movies',infEndpoint='';
+
+async function apiFetch(path){
+  const r=await fetch('/api/rtm'+path.replace('/api/rtm',''));
+  if(!r.ok)throw new Error('HTTP '+r.status);
+  const ct=r.headers.get('Content-Type')||'';
+  const enc=r.headers.get('X-RTM-Enc');
+  if(enc==='1'||ct.includes('x-rtm')){const t=await r.text();try{return JSON.parse(atob(t));}catch{return JSON.parse(t);}}
+  return r.json();
+}
+
+// ══ BOOT ══════════════════════════════════════════════════
+async function boot(){
+  prog(10,'Connexion...');
+  try{
+    prog(30,'Chargement des films...');
+    await loadTab('movies');
+    prog(100,'Prêt!');
+    await sleep(100);
+    document.getElementById('boot').style.display='none';
+    document.getElementById('app').style.display='block';
+  }catch(e){prog(0,'Erreur: '+e.message);document.getElementById('bm').style.color='var(--rd)';}
+}
+function prog(p,m){document.getElementById('bf').style.width=p+'%';document.getElementById('bm').textContent=m;}
+function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
+
+// ══ LOAD TAB ══════════════════════════════════════════════
+async function loadTab(tab){
+  currentTab=tab;
+  stopInfinite();
+  setContent('<div style="text-align:center;padding:56px 0"><div class="ring" style="width:30px;height:30px;border:3px solid rgba(255,255,255,.1);border-top-color:var(--ac);border-radius:50%;animation:spin .7s linear infinite;margin:0 auto"></div></div>');
+
+  if(tab==='movies'){
+    const [tr,pop,top,up,fr]=await Promise.all([
+      apiFetch('/movies/trending').catch(()=>({results:[]})),
+      apiFetch('/movies/popular').catch(()=>({results:[]})),
+      apiFetch('/movies/top').catch(()=>({results:[]})),
+      apiFetch('/movies/upcoming').catch(()=>({results:[]})),
+      apiFetch('/movies/popular?lang=fr').catch(()=>({results:[]})),
+    ]);
+    setHero(tr.results||[]);
+    renderSections([
+      {title:'🔥 Tendance',icon:'local_fire_department',items:tr.results||[],type:'movie',badge:'bn',endpoint:'/movies/trending'},
+      {title:'⭐ Populaires',icon:'star',items:pop.results||[],type:'movie',endpoint:'/movies/popular'},
+      {title:'🏆 Les Mieux Notés',icon:'emoji_events',items:top.results||[],type:'movie',badge:'bt',endpoint:'/movies/top'},
+      {title:'🆕 Nouveautés',icon:'new_releases',items:up.results||[],type:'movie',badge:'bn',endpoint:'/movies/upcoming'},
+      {title:'🇫🇷 Films Français',icon:'flag',items:fr.results||[],type:'movie',endpoint:'/movies/popular?lang=fr'},
+    ]);
+  }else if(tab==='tv'){
+    const [tr,pop,top]=await Promise.all([
+      apiFetch('/tv/trending').catch(()=>({results:[]})),
+      apiFetch('/tv/popular').catch(()=>({results:[]})),
+      apiFetch('/tv/top').catch(()=>({results:[]})),
+    ]);
+    setHero(tr.results||[]);
+    renderSections([
+      {title:'🔥 Séries Tendance',icon:'local_fire_department',items:tr.results||[],type:'tv',badge:'bn',endpoint:'/tv/trending'},
+      {title:'⭐ Séries Populaires',icon:'star',items:pop.results||[],type:'tv',endpoint:'/tv/popular'},
+      {title:'🏆 Séries Top Notées',icon:'emoji_events',items:top.results||[],type:'tv',badge:'bt',endpoint:'/tv/top'},
+    ]);
+  }else if(tab==='anime'){
+    // Anime = films/séries d'animation
+    const [ani,aniTop]=await Promise.all([
+      apiFetch('/movies/genre/16').catch(()=>({results:[]})), // 16 = Animation
+      apiFetch('/tv/genre/16').catch(()=>({results:[]})),
+    ]);
+    const items=[...(ani.results||[]),...(aniTop.results||[])];
+    setHero(items);
+    renderSections([
+      {title:'🌸 Anime Populaires',icon:'animation',items:ani.results||[],type:'movie',endpoint:'/movies/genre/16'},
+      {title:'📺 Séries Animées',icon:'live_tv',items:aniTop.results||[],type:'tv',endpoint:'/tv/genre/16'},
+    ]);
+  }else if(tab==='drama'){
+    // Drama = séries/films coréens, asiatiques
+    const [kr,jp]=await Promise.all([
+      apiFetch('/tv/popular?lang=ko').catch(()=>({results:[]})),
+      apiFetch('/tv/popular?lang=ja').catch(()=>({results:[]})),
+    ]);
+    setHero([...(kr.results||[]),...(jp.results||[])]);
+    renderSections([
+      {title:'🇰🇷 K-Drama Populaires',icon:'theaters',items:kr.results||[],type:'tv',badge:'bn',endpoint:'/tv/popular?lang=ko'},
+      {title:'🇯🇵 J-Drama & Anime',icon:'theaters',items:jp.results||[],type:'tv',endpoint:'/tv/popular?lang=ja'},
+    ]);
+  }
+}
+
+// ══ HERO ROTATION ═════════════════════════════════════════
+function setHero(items){
+  heroItems=items.filter(i=>i.backdrop_path).slice(0,8);
+  if(!heroItems.length)return;
+  heroIdx=0;
+  // Précharger les 3 premières images
+  for(let i=0;i<3&&i<heroItems.length;i++){
+    const el=document.getElementById('heroImg'+i);
+    if(el)el.src=imgUrl(heroItems[i].backdrop_path, IMG_ORIG);
+  }
+  updateHeroContent(0);
+  buildHeroDots();
+  startHeroRotation();
+}
+
+function buildHeroDots(){
+  const c=document.getElementById('heroDots');
+  c.innerHTML='';
+  heroItems.slice(0,8).forEach((_,i)=>{
+    const d=document.createElement('div');
+    d.className='hero-dot'+(i===0?' on':'');
+    d.onclick=()=>{stopHeroRotation();goHero(i);startHeroRotation();};
+    c.appendChild(d);
+  });
+}
+
+function updateHeroContent(idx){
+  const item=heroItems[idx];if(!item)return;
+  document.getElementById('htitle').textContent=item.title||item.name||'—';
+  const sc=item.vote_average?item.vote_average.toFixed(1):'—';
+  const yr=(item.release_date||item.first_air_date||'').substring(0,4);
+  document.getElementById('hmeta').innerHTML=`
+    <span class="h-sc"><span class="mi">star</span>${sc}</span>
+    <span class="hdot"></span><span class="h-yr">${yr}</span>`;
+  document.getElementById('hdesc').textContent=item.overview||'';
+  const type=item.title?'movie':'tv';
+  document.getElementById('hplay').onclick=()=>openPlayer(item,type);
+  document.getElementById('hinfo').onclick=()=>openInfo(item,type);
+  // Dots
+  document.querySelectorAll('.hero-dot').forEach((d,i)=>d.classList.toggle('on',i===idx));
+}
+
+function goHero(idx){
+  // Rotation des images
+  const prev=heroIdx;
+  heroIdx=idx;
+  const imgs=[document.getElementById('heroImg0'),document.getElementById('heroImg1'),document.getElementById('heroImg2')];
+  // Trouver l'image inactive à réutiliser
+  const slot=idx%3;
+  const prevSlot=prev%3;
+  if(imgs[slot]){
+    imgs[slot].src=imgUrl(heroItems[idx].backdrop_path, IMG_ORIG);
+    // Activer la nouvelle
+    imgs.forEach((im,i)=>im?.classList.toggle('active',i===slot));
+  }
+  updateHeroContent(idx);
+}
+
+function startHeroRotation(){
+  stopHeroRotation();
+  if(heroItems.length<=1)return;
+  heroTimer=setInterval(()=>{
+    const next=(heroIdx+1)%heroItems.length;
+    goHero(next);
+  },5000);
+}
+function stopHeroRotation(){if(heroTimer)clearInterval(heroTimer);heroTimer=null;}
+
+// ══ RENDER SECTIONS ═══════════════════════════════════════
+function renderSections(sections){
+  const c=document.getElementById('mainContent');c.innerHTML='';
+  for(const sec of sections){
+    if(!sec.items?.length)continue;
+    const s=document.createElement('div');s.className='section';
+    const hdr=document.createElement('div');hdr.className='sec-hdr';
+    hdr.innerHTML=`<div class="sec-title"><span class="mi">${sec.icon}</span>${sec.title}</div>
+      <div class="see-all" title="Voir tout"><span class="mi">arrow_forward_ios</span></div>`;
+    hdr.querySelector('.see-all').addEventListener('click',()=>showInfiniteSection(sec));
+    s.appendChild(hdr);
+    const row=document.createElement('div');row.className='row';
+    sec.items.slice(0,20).forEach((item,i)=>row.appendChild(mkCard(item,sec.type,i<3?sec.badge:null)));
+    s.appendChild(row);c.appendChild(s);
+  }
+}
+
+// ══ SECTION INFINIE (scroll vers le bas) ══════════════════
+function showInfiniteSection(sec){
+  stopInfinite();
+  const c=document.getElementById('mainContent');c.innerHTML='';
+  const bc=document.createElement('div');bc.className='bc';
+  bc.innerHTML=`<span class="bl" id="bcHome">Accueil</span>
+    <span class="mi">chevron_right</span><span class="cur">${sec.title}</span>`;
+  bc.querySelector('#bcHome').addEventListener('click',()=>loadTab(currentTab));
+  c.appendChild(bc);
+  const grid=document.createElement('div');grid.className='inf-grid';grid.id='infGrid';
+  c.appendChild(grid);
+  const loader=document.createElement('div');loader.className='inf-loader';loader.id='infLoader';
+  loader.innerHTML='<div class="ring"></div><span>Chargement...</span>';
+  c.appendChild(loader);
+  const sentinel=document.createElement('div');sentinel.id='infSentinel';
+  c.appendChild(sentinel);
+
+  // Init infinite scroll
+  infPage=1;infLoading=false;infDone=false;
+  infType=sec.type;infEndpoint=sec.endpoint;
+  // Ajouter les items initiaux
+  sec.items.forEach(item=>grid.appendChild(mkCard(item,sec.type)));
+  infPage=2; // prochain fetch = page 2
+  setupInfiniteScroll();
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+
+function setupInfiniteScroll(){
+  const sentinel=document.getElementById('infSentinel');
+  if(!sentinel)return;
+
+  async function loadMore(){
+    if(infLoading||infDone)return;
+    infLoading=true;
+    try{
+      const url=infEndpoint+(infEndpoint.includes('?')?'&':'?')+'page='+infPage;
+      const d=await apiFetch(url);
+      const results=d.results||[];
+      const loader=document.getElementById('infLoader');
+      if(!results.length){
+        infDone=true;
+        if(loader)loader.style.display='none';
+        return;
+      }
+      const grid=document.getElementById('infGrid');
+      if(!grid)return;
+      results.forEach(item=>grid.appendChild(mkCard(item,infType)));
+      infPage++;
+    }catch(e){
+      console.warn('[InfScroll]',e.message);
+      infDone=true;
+    }finally{
+      infLoading=false;
+    }
+  }
+
+  // IntersectionObserver avec rootMargin généreux
+  const obs=new IntersectionObserver((entries)=>{
+    if(entries[0].isIntersecting)loadMore();
+  },{rootMargin:'500px',threshold:0});
+  obs.observe(sentinel);
+
+  // Fallback scroll natif (mobile/navigateurs anciens)
+  window.addEventListener('scroll',function _scl(){
+    if(infDone){window.removeEventListener('scroll',_scl);return;}
+    const distFromBottom=document.documentElement.scrollHeight-window.scrollY-window.innerHeight;
+    if(distFromBottom<800)loadMore();
+  },{passive:true});
+}
+
+function stopInfinite(){infDone=true;infLoading=false;}
+
+// ══ CARD ══════════════════════════════════════════════════
+function mkCard(item,type,badge=null){
+  const d=document.createElement('div');d.className='mc';
+  const poster=item.poster_path?imgUrl(item.poster_path,'w342'):'';
+  const sc=item.vote_average?item.vote_average.toFixed(1):'';
+  const yr=(item.release_date||item.first_air_date||'').substring(0,4);
+  d.innerHTML=`<div class="mc-poster">
+    ${poster?`<img src="${poster}" alt="" loading="lazy" class="loading" onload="this.classList.remove('loading')">`
+      :`<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center">
+        <span class="mi" style="font-size:32px;color:var(--t3)">${type==='anime'||type==='movie'?'movie':'live_tv'}</span></div>`}
+    ${badge?`<div class="mc-badge ${badge}">${badge==='bn'?'NEW':'TOP'}</div>`:''}
+    <div class="mc-ov">
+      <div class="mc-play"><span class="mi">play_arrow</span></div>
+      ${sc?`<div class="mc-sc"><span class="mi">star</span>${sc}</div>`:''}
+    </div>
+  </div>
+  <div class="mc-info">
+    <div class="mc-title">${item.title||item.name||'—'}</div>
+    <div class="mc-meta">${yr}</div>
+  </div>`;
+  d.addEventListener('click',()=>openInfo(item,type));
+  return d;
+}
+
+// ══ MODAL INFO ════════════════════════════════════════════
+async function openInfo(item,type){
+  currentItem={...item,_type:type};
+  document.getElementById('infoModal').classList.add('open');
+  document.getElementById('infoTitle').textContent=item.title||item.name||'—';
+  document.getElementById('infoPoster').src=item.poster_path?imgUrl(item.poster_path,'w342'):'';
+  document.getElementById('infoOverview').textContent=item.overview||'';
+  document.getElementById('infoCastWrap').style.display='none';
+  document.getElementById('infoGenres').innerHTML='';
+  const sc=item.vote_average?item.vote_average.toFixed(1):'—';
+  const yr=(item.release_date||item.first_air_date||'').substring(0,4);
+  document.getElementById('infoMeta').innerHTML=`
+    <span class="info-score"><span class="mi">star</span>${sc}</span>
+    <span class="info-dot"></span><span class="info-yr">${yr}</span>`;
+  document.getElementById('infoPlay').onclick=()=>{closeInfo();openPlayer(item,type);};
+  document.getElementById('infoClose2').onclick=closeInfo;
+  document.getElementById('infoClose').onclick=closeInfo;
+
+  // Charger détails complets en arrière-plan
+  try{
+    const det=await apiFetch(`/${type==='movie'?'movies':'tv'}/details/${item.id}`);
+    if(det.genres?.length){
+      document.getElementById('infoGenres').innerHTML=
+        det.genres.slice(0,4).map(g=>`<span class="info-genre">${g.name}</span>`).join('');
+    }
+    if(det.runtime||det.number_of_seasons){
+      const dur=det.runtime?det.runtime+' min':det.number_of_seasons+' saison'+(det.number_of_seasons>1?'s':'');
+      document.getElementById('infoMeta').innerHTML+=
+        `<span class="info-dot"></span><span class="info-dur">${dur}</span>`;
+    }
+    if(det.overview)document.getElementById('infoOverview').textContent=det.overview;
+    // Cast
+    const cast=det.credits?.cast?.slice(0,10)||[];
+    if(cast.length){
+      document.getElementById('infoCastWrap').style.display='block';
+      document.getElementById('infoCast').innerHTML=cast.map(a=>`
+        <div class="cast-item">
+          <img class="cast-img" src="${a.profile_path?imgUrl(a.profile_path,'w185'):''}" alt=""
+            onerror="this.style.background='var(--s2)'">
+          <div class="cast-name">${a.name||''}</div>
+        </div>`).join('');
+    }
+    // Stocker token pour le play
+    currentItem.streamToken=det.streamToken;
+    currentItem.trailerKey=det.trailerKey;
+    document.getElementById('infoPlay').onclick=()=>{closeInfo();openPlayerWithToken(det,type,item);};
+  }catch(e){}
+}
+
+function closeInfo(){document.getElementById('infoModal').classList.remove('open');}
+
+// ══ PLAYER ════════════════════════════════════════════════
+async function openPlayer(item,type){
+  document.getElementById('modal').classList.add('open');
+  document.body.style.overflow='hidden';
+  currentItem={...item,_type:type};currentSeason=1;currentEp=1;
+  showPLoad(true,'Récupération des infos...');hidePFrame();
+  document.getElementById('seasonsWrap').style.display='none';
+  document.getElementById('pbTrailer').style.display='none';
+  document.getElementById('pbDl').style.display='none';
+  document.getElementById('pbTitle').textContent=item.title||item.name||'—';
+  document.getElementById('pbMeta').textContent='';
+  try{
+    const det=await apiFetch(`/${type==='movie'?'movies':'tv'}/details/${item.id}`);
+    if(!det.streamToken){showPLoad(true,'⚠️ Ce titre n\'est pas disponible au streaming.');return;}
+    openPlayerWithToken(det,type,item);
+  }catch(e){showPLoad(true,'❌ Erreur de chargement. Réessayez.');}
+}
+
+function openPlayerWithToken(det,type,item){
+  if(!document.getElementById('modal').classList.contains('open')){
+    document.getElementById('modal').classList.add('open');
+    document.body.style.overflow='hidden';
+  }
+  currentItem={...item,_type:type,streamToken:det.streamToken,trailerKey:det.trailerKey,tmdbId:det.id||item.id};
+  currentSeason=1;currentEp=1;
+  showPLoad(true,'Démarrage du player...');hidePFrame();
+  document.getElementById('seasonsWrap').style.display='none';
+  const sc=det.vote_average?det.vote_average.toFixed(1):'';
+  const yr=(det.release_date||det.first_air_date||'').substring(0,4);
+  const genres=(det.genres||[]).map(g=>g.name).slice(0,3).join(' · ');
+  document.getElementById('pbTitle').textContent=det.title||det.name||item.title||item.name||'—';
+  document.getElementById('pbMeta').textContent=[sc?'⭐ '+sc:'',yr,genres].filter(Boolean).join(' · ');
+  if(det.trailerKey){
+    document.getElementById('pbTrailer').style.display='flex';
+    document.getElementById('pbTrailer').onclick=()=>loadYT(det.trailerKey);
+  }
+  if(type==='movie'){
+    document.getElementById('pbDl').style.display='flex';
+    document.getElementById('pbDl').onclick=()=>startDl(det.id||item.id);
+    loadEmbed(det.streamToken);
+  }else{
+    document.getElementById('pbDl').style.display='none';
+    const seasons=(det.seasons||[]).filter(s=>s.season_number>0);
+    if(seasons.length){
+      document.getElementById('seasonsWrap').style.display='block';
+      buildSeasons(seasons,det.streamToken);
+    }
+    loadEmbed(det.streamToken,1,1);
+  }
+}
+
+// ══ PROVIDERS EMBED ══════════════════════════════════════
+// Liste des providers fallback (cachés côté serveur)
+// Le backend retourne l'URL du premier provider, si fail on essaie les suivants
+let _embedRetry=0;
+const _MAX_EMBED_RETRY=3;
+
+function loadEmbed(token,s,ep){
+  _embedRetry=0;
+  _tryEmbed(token,s,ep,_embedRetry);
+}
+
+async function _tryEmbed(token,s,ep,attempt){
+  showPLoad(true,attempt>0?`Tentative ${attempt+1}/${_MAX_EMBED_RETRY+1}...`:'Démarrage du player...');
+  const f=document.getElementById('pFrame');
+  f.onload=null;f.onerror=null;
+  try{f.style.display='none';f.src='about:blank';}catch(_){}
+  if(window._et)clearTimeout(window._et);
+  if(window._ew)clearTimeout(window._ew);
+
+  // Étape 1 : récupérer l'URL embed via API (retourne JSON {url:"https://..."})
+  let apiUrl=`/api/rtm/embed?token=${encodeURIComponent(token)}`;
+  if(s!=null&&s>0)apiUrl+=`&s=${s}&ep=${ep||1}`;
+  if(attempt>0)apiUrl+=`&retry=${attempt}`; // signale au backend d'essayer un autre provider
+
+  try{
+    const resp=await fetch(apiUrl);
+    if(!resp.ok)throw new Error('HTTP '+resp.status);
+    const data=await resp.json();
+    if(!data.url)throw new Error('No URL from server');
+
+    // Étape 2 : créer un wrapper HTML avec ad-blocker intégré
+    // On ne charge PAS l'URL embed directement dans notre iframe principale
+    // → on crée un blob HTML qui contient l'iframe du provider
+    const wrapHtml=_buildPlayerPage(data.url);
+    const blob=new Blob([wrapHtml],{type:'text/html'});
+    const blobUrl=URL.createObjectURL(blob);
+
+    // Timeout de chargement : 30s
+    window._ew=setTimeout(()=>{
+      if(document.getElementById('pLoad').style.display!=='none'){
+        showPLoad(true,'⏱ Chargement lent... patientez');
+      }
+    },20000);
+
+    f.onload=function(){
+      f.onload=null;
+      try{URL.revokeObjectURL(blobUrl);}catch(_){}
+      f.style.display='block';
+      window._et=setTimeout(()=>showPLoad(false),2000);
+    };
+    f.onerror=function(){
+      f.onerror=null;
+      if(window._et)clearTimeout(window._et);
+      if(window._ew)clearTimeout(window._ew);
+      // Retry automatique
+      if(_embedRetry<_MAX_EMBED_RETRY){
+        _embedRetry++;
+        setTimeout(()=>_tryEmbed(token,s,ep,_embedRetry),1500);
+      }else{
+        showPLoad(true,'❌ Player indisponible. Réessayez plus tard.');
+      }
+    };
+    f.src=blobUrl;
+
+  }catch(e){
+    console.error('[Embed] Erreur:', e.message);
+    if(_embedRetry<_MAX_EMBED_RETRY){
+      _embedRetry++;
+      setTimeout(()=>_tryEmbed(token,s,ep,_embedRetry),2000);
+    }else{
+      showPLoad(true,'❌ Erreur de chargement. Vérifiez votre connexion.');
+    }
+  }
+}
+
+// ══ WRAPPER HTML PLAYER avec ad-blocker ultra-puissant ══
+function _buildPlayerPage(embedUrl){
+  const adDomains=JSON.stringify([
+    'doubleclick','googlesyndication','googletagmanager','google-analytics',
+    'adservice','pagead','adnxs','cdn4ads','popads','popcash','propellerads',
+    'trafficjunky','exoclick','juicyads','taboola','outbrain','mgid','revcontent',
+    'omnitagjs','prebid','adsense','bidvertiser','hilltopads','scorecardresearch',
+    'popunder','clickadu','monetag','adsterra','runative','adcash',
+    '1xbet','betway','casino','xbet','imasdk.googleapis','fwmrm.net','aniview',
+    'a-ads.com','popcash.net','popads.net','trafficfactory','traffichunt',
+    'adspyglass','ero-advertising','cpmstar','owneriq','undertone','yieldmo',
+    'pornhub','xvideos','xhamster','brazzers','redtube','tube8','youporn'
+  ]);
+  // Sanitize l'URL pour éviter l'injection
+  const safeUrl=embedUrl.replace(/"/g,'%22').replace(/'/g,'%27').replace(/</g,'%3C').replace(/>/g,'%3E');
+  return `<!DOCTYPE html><html><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;background:#000;overflow:hidden}
+#fw{width:100%;height:100%;position:relative}
+#pif{width:100%;height:100%;border:none;display:block;background:#000}
+/* Bloquer les overlays pub */
+div[style*="z-index: 9999"]:not(#fw),div[style*="z-index:9999"]:not(#fw),
+div[style*="position: fixed"][style*="top: 0"]:not(#fw),
+div[id*="ad"],div[class*="ad-"],div[class*="popup-"],div[class*="overlay"],
+ins.adsbygoogle,.adsbygoogle,div[class*="interstitial"],
+iframe[style*="display:none"],iframe[width="0"],iframe[height="0"],
+iframe[style*="width:0"],iframe[style*="height:0"]{
+  display:none!important;visibility:hidden!important;pointer-events:none!important;
+}
+</style>
+</head><body>
+<div id="fw">
+  <iframe id="pif" src="${safeUrl}"
+    allowfullscreen
+    allow="autoplay; fullscreen; picture-in-picture; encrypted-media; accelerometer; gyroscope"
+    sandbox="allow-scripts allow-same-origin allow-forms allow-presentation allow-popups-to-escape-sandbox">
+  </iframe>
+</div>
+<script>
+(function(){
+  var AD=${adDomains};
+  function ia(u){if(!u||typeof u!=='string')return false;var l=u.toLowerCase();return AD.some(function(d){return l.indexOf(d)>=0;});}
+  // Bloquer XHR vers ads
+  var oX=XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open=function(m,u){if(ia(String(u)))return;return oX.apply(this,arguments);};
+  // Bloquer fetch vers ads
+  var oF=window.fetch;
+  window.fetch=function(u){if(ia(String(u)))return Promise.resolve(new Response('',{status:200}));return oF.apply(this,arguments);};
+  // Bloquer popups
+  window.open=function(){return null;};
+  window.alert=function(){};
+  window.confirm=function(){return true;};
+  window.prompt=function(){return null;};
+  // Bloquer navigation non voulue
+  window.addEventListener('beforeunload',function(e){e.preventDefault();e.returnValue='';},true);
+  // Observer DOM pour supprimer overlays/pubs dynamiques
+  function clean(){
+    try{
+      document.querySelectorAll('div,ins,aside,section').forEach(function(el){
+        if(el.id==='fw'||el.id==='pif')return;
+        var id=(el.id||'').toLowerCase();
+        var cl=(el.className||'').toLowerCase();
+        // Supprimer par ID/classe publicitaire
+        if(id.match(/^(ad|ads|advert|banner|popup|overlay|interstitial|sponsor|promo)/)
+          ||cl.match(/(^|\s)(ad[-_]|ads[-_]|advert|banner-ad|popup|overlay|interstitial)/)){
+          el.style.cssText='display:none!important;pointer-events:none!important';return;
+        }
+        // Supprimer les éléments positionnés en overlay avec z-index élevé
+        var z=parseInt(el.style.zIndex||0)||parseInt(getComputedStyle(el).zIndex||0)||0;
+        var p=el.style.position||getComputedStyle(el).position;
+        if(z>100&&(p==='fixed'||p==='absolute')&&!el.querySelector('video,canvas')){
+          el.style.cssText='display:none!important;pointer-events:none!important';
+        }
+      });
+    }catch(_){}
+  }
+  // Observer les mutations
+  if(window.MutationObserver){
+    new MutationObserver(function(){setTimeout(clean,50);}).observe(document.documentElement,{childList:true,subtree:true});
+  }
+  setInterval(clean,1500);
+})();
+<\/script>
+</body></html>`;
+}
+
+function loadYT(key){
+  showPLoad(true,'Bande-annonce...');hidePFrame();
+  const f=document.getElementById('pFrame');
+  f.onload=()=>{showPLoad(false);f.style.display='block';};
+  f.src=`https://www.youtube.com/embed/${key}?autoplay=1`;
+}
+
+function buildSeasons(seasons,token){
+  const bar=document.getElementById('seasonsBar');
+  bar.innerHTML=seasons.map(s=>`<button class="sbtn ${s.season_number===1?'on':''}" data-s="${s.season_number}">S${s.season_number}</button>`).join('');
+  bar.querySelectorAll('.sbtn').forEach(b=>b.addEventListener('click',()=>{
+    bar.querySelectorAll('.sbtn').forEach(x=>x.classList.remove('on'));b.classList.add('on');
+    currentSeason=parseInt(b.dataset.s);currentEp=1;
+    buildEps(seasons.find(s=>s.season_number===currentSeason),token);
+    loadEmbed(token,currentSeason,1);
+  }));
+  buildEps(seasons[0],token);
+}
+
+function buildEps(season,token){
+  if(!season)return;
+  const row=document.getElementById('epRow');row.innerHTML='';
+  for(let ep=1;ep<=Math.min(season.episode_count||1,60);ep++){
+    const b=document.createElement('button');b.className='epb'+(ep===currentEp?' on':'');
+    b.textContent='Ép. '+ep;b.dataset.ep=ep;
+    b.addEventListener('click',()=>{
+      row.querySelectorAll('.epb').forEach(x=>x.classList.remove('on'));
+      b.classList.add('on');currentEp=ep;
+      if(currentItem?.streamToken)loadEmbed(currentItem.streamToken,currentSeason,ep);
+    });
+    row.appendChild(b);
+  }
+}
+
+// Plein écran
+document.getElementById('pbFs').addEventListener('click',()=>{
+  const f=document.getElementById('pFrame');
+  const ps=document.getElementById('playerSec');
+  const m=document.getElementById('modal');
+  try{
+    if(f.style.display!=='none'&&f.requestFullscreen)f.requestFullscreen();
+    else if(ps.requestFullscreen)ps.requestFullscreen();
+    else if(m.requestFullscreen)m.requestFullscreen();
+    else if(ps.webkitRequestFullscreen)ps.webkitRequestFullscreen();
+  }catch(e){if(m.requestFullscreen)m.requestFullscreen().catch(()=>{});}
+});
+
+function closePlayer(){
+  document.getElementById('modal').classList.remove('open');
+  document.body.style.overflow='';
+  const f=document.getElementById('pFrame');f.src='about:blank';f.style.display='none';
+  showPLoad(false);
+  if(document.fullscreenElement)document.exitFullscreen().catch(()=>{});
+}
+document.getElementById('pbClose').addEventListener('click',closePlayer);
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){
+    if(!document.fullscreenElement)closePlayer();
+    closeInfo();closeVIP();document.getElementById('dlModal').classList.remove('open');
+  }
+});
+
+// ══ DOWNLOAD VIP ══════════════════════════════════════════
+function startDl(movieId){
+  pendingDlId=movieId;
+  if(vipToken)doDl(movieId,vipToken);else openVIP();
+}
+function openVIP(){
+  document.getElementById('vipModal').classList.add('open');
+  document.getElementById('vipIn').value='';
+  document.getElementById('vipErr').style.display='none';
+  setTimeout(()=>document.getElementById('vipIn').focus(),200);
+}
+function closeVIP(){document.getElementById('vipModal').classList.remove('open');}
+document.getElementById('vipOk').addEventListener('click',async()=>{
+  const code=document.getElementById('vipIn').value.trim();if(!code)return;
+  try{
+    const r=await fetch(`/api/rtm/vip/verify?code=${encodeURIComponent(code)}`);
+    const d=await r.json();
+    if(d.ok&&d.token){
+      vipToken=d.token;sessionStorage.setItem('vt',vipToken);
+      closeVIP();if(pendingDlId)doDl(pendingDlId,vipToken);
+    }else{
+      document.getElementById('vipErr').style.display='block';
+      document.getElementById('vipIn').value='';
+    }
+  }catch(e){document.getElementById('vipErr').style.display='block';}
+});
+document.getElementById('vipIn').addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('vipOk').click();});
+document.getElementById('vipCancel').addEventListener('click',closeVIP);
+async function doDl(movieId,token){
+  try{
+    const r=await fetch(`/api/rtm/movies/download/${movieId}?vip=${token}`);
+    if(r.status===403){vipToken=null;sessionStorage.removeItem('vt');openVIP();return;}
+    const d=await r.json();
+    if(d.sources?.length){
+      const el=document.getElementById('dlItems');
+      el.innerHTML=`<p style="font-size:.78rem;color:var(--t2);margin-bottom:10px">${d.title||''} ${d.year?'('+d.year+')':''}</p>`
+        +d.sources.map(s=>`<div class="dl-item"><span class="dl-q">${s.quality}</span>
+          <a href="${s.url}" target="_blank" class="dl-a"><span class="mi">download</span>Télécharger</a></div>`).join('');
+      document.getElementById('dlModal').classList.add('open');
+    }
+  }catch(e){console.error(e);}
+}
+document.getElementById('dlClose').addEventListener('click',()=>document.getElementById('dlModal').classList.remove('open'));
+
+// ══ SEARCH ════════════════════════════════════════════════
+document.getElementById('si').addEventListener('input',e=>{
+  clearTimeout(searchTimer);
+  const q=e.target.value.trim();
+  if(!q){loadTab(currentTab);return;}
+  searchTimer=setTimeout(async()=>{
+    stopInfinite();
+    const c=document.getElementById('mainContent');
+    c.innerHTML='<div style="padding:14px 0;font-size:.82rem;color:var(--t2)">Recherche en cours...</div>';
+    try{
+      const isMovieTab=currentTab==='movies'||currentTab==='anime';
+      const [mov,tv]=await Promise.all([
+        apiFetch(`/movies/search?q=${encodeURIComponent(q)}`).catch(()=>({results:[]})),
+        apiFetch(`/tv/search?q=${encodeURIComponent(q)}`).catch(()=>({results:[]})),
+      ]);
+      c.innerHTML='';
+      const bc=document.createElement('div');bc.className='bc';
+      bc.innerHTML=`<span class="bl" id="bcS">Accueil</span>
+        <span class="mi">chevron_right</span><span class="cur">Résultats pour "${q}"</span>`;
+      bc.querySelector('#bcS').addEventListener('click',()=>{document.getElementById('si').value='';loadTab(currentTab);});
+      c.appendChild(bc);
+      const all=[...(mov.results||[]).map(r=>({...r,_t:'movie'})),
+                 ...(tv.results||[]).map(r=>({...r,_t:'tv'}))];
+      if(!all.length){c.innerHTML+='<div class="empty"><span class="mi">search_off</span><p>Aucun résultat</p></div>';return;}
+      const h=document.createElement('p');
+      h.style.cssText='padding:0 0 12px;font-size:.82rem;color:var(--t2)';
+      h.textContent=all.length+' résultat'+(all.length>1?'s':'')+' pour "'+q+'"';
+      c.appendChild(h);
+      const grid=document.createElement('div');grid.className='inf-grid';
+      all.slice(0,60).forEach(item=>grid.appendChild(mkCard(item,item._t)));
+      c.appendChild(grid);
+    }catch(e){c.innerHTML='<div class="empty"><span class="mi">error</span><p>Erreur de recherche</p></div>';}
+  },380);
+});
+
+// ══ TABS ══════════════════════════════════════════════════
+document.querySelectorAll('.nt,.mnt[data-tab]').forEach(b=>{
+  b.addEventListener('click',()=>{
+    const t=b.dataset.tab;if(!t)return;
+    document.querySelectorAll('.nt,.mnt[data-tab]').forEach(x=>x.classList.remove('on'));
+    document.querySelectorAll(`[data-tab="${t}"]`).forEach(x=>x.classList.add('on'));
+    document.getElementById('si').value='';
+    loadTab(t);
+  });
+});
+
+// ══ UTILS ══════════════════════════════════════════════════
+function setContent(html){document.getElementById('mainContent').innerHTML=html;}
+function showPLoad(on,msg){
+  const el=document.getElementById('pLoad');el.style.display=on?'flex':'none';
+  if(msg){
+    let p=el.querySelector('.pmsg');
+    if(!p){p=document.createElement('div');p.className='pmsg';el.appendChild(p);}
+    p.textContent=msg;
+  }
+}
+function hidePFrame(){const f=document.getElementById('pFrame');f.style.display='none';}
+
+// Anti-sleep ping
+setInterval(()=>fetch('/api/rtm/health').catch(()=>{}),9*60*1000);
+
+boot();
+</script>
 </body>
 </html>
