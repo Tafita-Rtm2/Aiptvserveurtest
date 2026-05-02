@@ -6,35 +6,39 @@
 const S = {
   all: [],
   filtered: [],
+  events: [],
   countries: [],
-  groups: [],
-  currentCh: null,
-  currentFilter: 'all',
-  searchTerm: '',
-  dispIdx: 0,
-  pageSize: 60,
-  scrollLoading: false,
+  ps: 100,      // Page size
+  dispIdx: 0,   // Display index
+  view: 'all',  // current view (all, mg, sport, etc)
+  country: null,
+  group: null,
+  tab: 'live',  // active tab (live, radio, events)
+  q: '',        // search query
+  cq: '',       // country list search query
   dataSaver: false,
+  currentCh: null,
+  scrollLoading: false
 };
 
-// Drapeaux pays
 const F = {
   'MG':'🇲🇬','FR':'🇫🇷','RE':'🇷🇪','MU':'🇲🇺','US':'🇺🇸','GB':'🇬🇧',
   'ES':'🇪🇸','IT':'🇮🇹','DE':'🇩🇪','BR':'🇧🇷','CA':'🇨🇦','JP':'🇯🇵',
   'CN':'🇨🇳','IN':'🇮🇳','AR':'🇦🇷','AU':'🇦🇺','BE':'🇧🇪','CH':'🇨🇭',
 };
 
-// Noms pays
 const CN = {
   'MG':'Madagascar','FR':'France','RE':'Réunion','MU':'Maurice','US':'USA','GB':'UK',
   'ES':'Espagne','IT':'Italie','DE':'Allemagne','BR':'Brésil','CA':'Canada',
 };
 
-// Icônes catégories
 const ICON = {
-  news:'newspaper',sport:'sports_soccer',movies:'movie',music:'music_note',
-  kids:'child_care',general:'tv',entertainment:'theaters',religious:'church',
+  sport:'sports_soccer', news:'newspaper', kids:'child_care', movies:'theaters',
+  music:'music_note', radio:'radio', nature:'forest', religion:'church', tv:'live_tv'
 };
+
+const EV = ['champions','premier league','ligue 1','serie a','bundesliga','la liga',
+  'copa','world cup','can ','afcon','olympic','bein','eurosport','supersport'];
 
 // ══════════════════════════════════════════════════════════════
 // ░░░ SÉCURITÉ & ANTI-F12 ░░░
@@ -49,171 +53,223 @@ const ICON = {
 })();
 
 // ══════════════════════════════════════════════════════════════
-// ░░░ TOAST NOTIFICATIONS ░░░
+// ░░░ UTILS ░░░
 // ══════════════════════════════════════════════════════════════
 function toast(msg, type = 'info') {
+  const c = document.getElementById('toasts');
+  if (!c) return;
   const t = document.createElement('div');
   t.className = 'toast ' + type;
-  const icon = type === 'error' ? 'error' : type === 'success' ? 'check_circle' : 'info';
-  t.innerHTML = `<span class="mi">${icon}</span><div class="toast-msg">${msg}</div>`;
-  const container = document.getElementById('toasts');
-  if (container) {
-    container.appendChild(t);
-    setTimeout(() => t.remove(), 4000);
-  }
+  t.textContent = msg;
+  c.appendChild(t);
+  setTimeout(() => t.remove(), 3500);
+}
+
+function prog(p, m) {
+  const bf = document.getElementById('bf');
+  const bm = document.getElementById('bm');
+  if (bf) bf.style.width = p + '%';
+  if (bm) bm.textContent = m;
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function api(p) {
+  const r = await fetch(p);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+function cat(ch) {
+  const t = ((ch.group || '') + ' ' + (ch.name || '')).toLowerCase();
+  if (/sport|foot|soccer|basket|tennis|olymp|cricket|rugby|golf|nba|nfl|f1|formula|handball/.test(t)) return 'sport';
+  if (/news|info|actual|bbc|cnn|aljazeera|breaking|journal|24h|rfi|africanews/.test(t)) return 'news';
+  if (/kids|child|cartoon|disney|junior|baby|nickel|toon|gulli/.test(t)) return 'kids';
+  if (/movie|film|cinema|serie|entertain|hbo/.test(t)) return 'movies';
+  if (/music|mtv|clip|chart|hit|rock|jazz/.test(t)) return 'music';
+  if (/radio/.test(t)) return 'radio';
+  if (/nature|discovery|national|geo|animal|planet/.test(t)) return 'nature';
+  if (/religi|church|islam|christian|quran|prayer|gospel/.test(t)) return 'religion';
+  return 'tv';
 }
 
 // ══════════════════════════════════════════════════════════════
-// ░░░ CHARGEMENT INITIAL DES CHAÎNES ░░░
+// ░░░ BOOT ░░░
 // ══════════════════════════════════════════════════════════════
-async function loadChannels() {
+async function boot() {
+  prog(5, 'Connexion...');
+  for (let i = 0; i < 25; i++) {
+    try {
+      const h = await api('/api/rtm/health');
+      if (h.cached && h.total > 0) break;
+      prog(8 + i * 2, 'Chargement: ' + (h.total || 0) + '...');
+      await sleep(2000);
+    } catch (e) {
+      prog(5, 'Reconnexion...');
+      await sleep(3000);
+    }
+  }
+
+  prog(50, 'Récupération...');
   try {
-    const gcnt = document.getElementById('gcnt');
-    if (gcnt) gcnt.textContent = 'Connexion au serveur...';
+    const res = await api('/api/rtm/channels?limit=50000');
+    S.all = res.channels || [];
 
-    const res = await fetch('/api/rtm/channels?limit=50000');
-    if (!res.ok) throw new Error('Network error');
+    S.events = S.all.filter(ch => EV.some(k => ((ch.name || '') + ' ' + (ch.group || '')).toLowerCase().includes(k)));
+    const cs = new Set();
+    S.all.forEach(c => { if (c.country) cs.add(c.country); });
+    S.countries = [...cs].sort((a, b) => a === 'MG' ? -1 : b === 'MG' ? 1 : a.localeCompare(b));
 
-    const data = await res.json();
-    S.all = data.channels || [];
+    const resC = await api('/api/rtm/countries');
+    S.countries = resC.countries || S.countries;
 
-    if (S.all.length === 0) throw new Error('Aucune chaîne disponible');
-
-    const [resC, resG] = await Promise.all([
-      fetch('/api/rtm/countries'),
-      fetch('/api/rtm/groups')
-    ]);
-
-    const [dataC, dataG] = await Promise.all([resC.json(), resG.json()]);
-    S.countries = dataC.countries || [];
-    S.groups = dataG.groups || [];
-
-    renderPills();
+    document.getElementById('totC').textContent = S.all.length.toLocaleString();
+    buildCL();
+    buildPills();
     applyFilters();
 
-    toast(`${S.all.length} chaînes prêtes`, 'success');
+    prog(100, 'Prêt!');
+    await sleep(150);
+    document.getElementById('boot').style.display = 'none';
+    document.getElementById('app').style.display = 'flex';
+
+    const mgCount = S.all.filter(c => c.country === 'MG').length;
+    toast(`✅ ${S.all.length.toLocaleString()} chaînes prêtes`, 'ok');
+    setupInfiniteScroll();
 
   } catch (e) {
-    console.error('Boot error:', e);
-    toast('Erreur de chargement', 'error');
-    const gcnt = document.getElementById('gcnt');
-    if (gcnt) gcnt.textContent = 'Erreur';
+    console.error(e);
+    prog(0, 'Erreur: ' + e.message);
+    document.getElementById('bm').style.color = '#ff5566';
   }
 }
 
 // ══════════════════════════════════════════════════════════════
-// ░░░ RENDU PILLS (FILTRES) ░░░
+// ░░░ UI BUILDERS ░░░
 // ══════════════════════════════════════════════════════════════
-function renderPills() {
-  const w = document.getElementById('pills');
-  if (!w) return;
-  w.innerHTML = '';
+function buildCL() {
+  const el = document.getElementById('cl');
+  if (!el) return;
+  const q = S.cq.toLowerCase();
+  const list = q ? S.countries.filter(c => (CN[c] || c).toLowerCase().includes(q) || c.toLowerCase().includes(q)) : S.countries;
 
-  const pAll = document.createElement('div');
-  pAll.className = 'pill active';
-  pAll.innerHTML = '<span class="mi">tv</span> Toutes';
-  pAll.onclick = (e) => setFilter('all', null, e.target);
-  w.appendChild(pAll);
+  let h = `<div class="ci ${!S.country ? 'on' : ''}" data-c="">🌍 Tous</div>`;
+  list.slice(0, 100).forEach(c => {
+    h += `<div class="ci ${S.country === c ? 'on' : ''}" data-c="${c}">${F[c] || '🏳️'} ${CN[c] || c}</div>`;
+  });
+  el.innerHTML = h;
 
-  S.countries.slice(0, 15).forEach(c => {
-    const p = document.createElement('div');
-    p.className = 'pill';
-    p.innerHTML = `${F[c] || ''} ${CN[c] || c}`;
-    p.onclick = (e) => setFilter('country', c, e.currentTarget);
-    w.appendChild(p);
+  el.querySelectorAll('.ci').forEach(b => b.onclick = () => {
+    S.country = b.dataset.c || null;
+    S.group = null;
+    S.dispIdx = 0;
+    el.querySelectorAll('.ci').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    document.querySelectorAll('.nb').forEach(x => x.classList.remove('on'));
+    applyFilters();
+    closeSB();
   });
 }
 
-function setFilter(type, value, el) {
-  S.currentFilter = type === 'all' ? 'all' : `${type}:${value}`;
-  document.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
-  if (el) el.classList.add('active');
-  applyFilters();
+function buildPills() {
+  const bar = document.getElementById('pills');
+  if (!bar) return;
+  if (S.tab === 'events') { bar.innerHTML = ''; return; }
+
+  let gs = S.all.map(c => c.group).filter(Boolean);
+  if (S.tab === 'radio') gs = gs.filter(g => /radio/i.test(g));
+  else gs = gs.filter(g => !/radio/i.test(g));
+
+  const u = [...new Set(gs)].sort().slice(0, 22);
+  let h = '<button class="pill on" data-g="">Toutes</button>';
+  u.forEach(g => h += `<button class="pill" data-g="${encodeURIComponent(g)}">${g}</button>`);
+  bar.innerHTML = h;
+
+  bar.querySelectorAll('.pill').forEach(b => b.onclick = () => {
+    S.group = b.dataset.g ? decodeURIComponent(b.dataset.g) : null;
+    S.dispIdx = 0;
+    bar.querySelectorAll('.pill').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    applyFilters();
+  });
 }
 
 function applyFilters() {
-  let list = [...S.all];
-  if (S.currentFilter !== 'all') {
-    const [type, val] = S.currentFilter.split(':');
-    if (type === 'country') list = list.filter(ch => ch.country === val);
+  if (S.tab === 'events') { renderEvents(); return; }
+
+  let ch = [...S.all];
+  const q = S.q.toLowerCase().trim();
+
+  if (S.view === 'mg') ch = ch.filter(c => c.country === 'MG');
+  else if (S.view === 'radio') ch = ch.filter(c => cat(c) === 'radio');
+  else if (S.view !== 'all') ch = ch.filter(c => cat(c) === S.view && cat(c) !== 'radio');
+
+  if (S.tab === 'radio') ch = ch.filter(c => cat(c) === 'radio');
+  else if (S.tab === 'live' && S.view !== 'radio') ch = ch.filter(c => cat(c) !== 'radio');
+
+  if (S.country) ch = ch.filter(c => c.country === S.country);
+  if (S.group) ch = ch.filter(c => c.group === S.group);
+
+  if (q) {
+    ch = ch.filter(c => (c.name || '').toLowerCase().includes(q) || (c.group || '').toLowerCase().includes(q));
   }
 
-  if (S.searchTerm) {
-    const q = S.searchTerm.toLowerCase();
-    list = list.filter(ch => ch.name.toLowerCase().includes(q) || (ch.group || '').toLowerCase().includes(q));
-  }
-
-  S.filtered = list;
+  S.filtered = ch;
   S.dispIdx = 0;
 
-  const wrap = document.getElementById('chGrid');
-  if (wrap) wrap.innerHTML = '';
-  const gw = document.getElementById('gw');
-  if (gw) gw.scrollTop = 0;
+  const labels = {all:'TV Live', mg:'🇲🇬 Madagascar', sport:'⚽ Sport', news:'📰 Actualités', kids:'🧸 Enfants', movies:'🎬 Films TV', music:'🎵 Musique', nature:'🌿 Nature', religion:'⛪ Religion', radio:'📻 Radio'};
+  let title = q ? `"${S.q}"` : S.country && S.view !== 'mg' ? (F[S.country] || '') + ' ' + (CN[S.country] || S.country) : (labels[S.view] || 'TV Live');
 
-  const gtitle = document.getElementById('gtitle');
-  if (gtitle) {
-    gtitle.textContent = S.searchTerm ? `🔍 Recherche` :
-                        S.currentFilter === 'all' ? `📺 Toutes les chaînes` :
-                        `📺 ${S.currentFilter.split(':')[1]}`;
-  }
-
-  const gcnt = document.getElementById('gcnt');
-  if (gcnt) gcnt.textContent = `${S.filtered.length.toLocaleString()} chaînes`;
+  document.getElementById('gtitle').textContent = title;
+  document.getElementById('gcnt').textContent = ch.length.toLocaleString() + ' chaînes';
 
   renderGrid(true);
 }
 
-// ══════════════════════════════════════════════════════════════
-// ░░░ RENDU GRID AVEC SCROLL INFINI ░░░
-// ══════════════════════════════════════════════════════════════
-function renderGrid(reset = false) {
+function renderGrid(reset) {
   const wrap = document.getElementById('chGrid');
-  if (!wrap) return;
   const sentinel = document.getElementById('sentinel');
-
   if (reset) {
     wrap.innerHTML = '';
-    S.dispIdx = 0;
+    wrap.className = 'grid';
+    document.getElementById('gw').scrollTop = 0;
   }
 
-  const slice = S.filtered.slice(S.dispIdx, S.dispIdx + S.pageSize);
+  const slice = S.filtered.slice(S.dispIdx, S.dispIdx + S.ps);
   S.dispIdx += slice.length;
 
-  if (reset && slice.length === 0) {
-    wrap.innerHTML = '<div class="empty"><span class="mi">search_off</span><p>Aucun résultat</p></div>';
+  if (reset && !slice.length) {
+    wrap.innerHTML = '<div class="empty" style="grid-column:1/-1"><span class="mi">search_off</span><p>Aucune chaîne</p></div>';
     if (sentinel) sentinel.style.display = 'none';
     return;
   }
 
   const frag = document.createDocumentFragment();
-  slice.forEach(ch => frag.appendChild(makeCard(ch)));
+  slice.forEach(ch => frag.appendChild(mkCard(ch)));
   wrap.appendChild(frag);
 
   const hasMore = S.dispIdx < S.filtered.length;
   if (sentinel) {
     sentinel.style.display = hasMore ? 'flex' : 'none';
-    const sentTxt = document.getElementById('sentinelTxt');
-    if (sentTxt && hasMore) sentTxt.textContent = `${(S.filtered.length - S.dispIdx).toLocaleString()} restantes`;
+    if (hasMore) document.getElementById('sentinelTxt').textContent = `${(S.filtered.length - S.dispIdx).toLocaleString()} restantes`;
   }
 }
 
-function makeCard(ch) {
+function mkCard(ch) {
   const d = document.createElement('div');
   const isNow = S.currentCh && S.currentCh.id === ch.id;
   d.className = 'card' + (isNow ? ' now' : '');
   d.dataset.id = ch.id;
 
   const flag = F[ch.country] || '';
-  const showLogo = ch.logo && !S.dataSaver;
-  const cat = (ch.group || '').toLowerCase();
-  const icon = Object.keys(ICON).find(k => cat.includes(k)) || 'general';
+  const c = cat(ch);
+  const showL = ch.logo && !S.dataSaver;
 
   d.innerHTML = `
+    <div class="ldot"></div>
     ${flag ? `<span class="cflag">${flag}</span>` : ''}
-    ${showLogo ?
-      `<img class="clogo" src="/api/rtm/img?u=${encodeURIComponent(ch.logo)}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">` : ''}
-    <div class="cfb" style="${showLogo ? 'display:none' : ''}"><span class="mi">${ICON[icon]}</span></div>
+    ${showL ? `<img class="clogo" src="/api/rtm/img?u=${encodeURIComponent(ch.logo)}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">` : ''}
+    <div class="cfb" style="${showL ? 'display:none' : ''}"><span class="mi">${ICON[c] || 'tv'}</span></div>
     <div class="cname">${ch.name}</div>
     <div class="ctag">${ch.group || ''}</div>
     ${isNow ? '<div class="nowico"><span class="mi">play_circle</span></div>' : ''}
@@ -223,126 +279,234 @@ function makeCard(ch) {
   return d;
 }
 
+function renderEvents() {
+  const w = document.getElementById('chGrid');
+  w.innerHTML = '';
+  w.className = 'ev-grid';
+  document.getElementById('sentinel').style.display = 'none';
+  document.getElementById('gtitle').textContent = '🏟️ Événements Live';
+  document.getElementById('gcnt').textContent = S.events.length + ' chaînes sport';
+
+  if (!S.events.length) {
+    w.innerHTML = '<div class="empty" style="grid-column:1/-1"><span class="mi">sports_soccer</span><p>Aucun événement</p></div>';
+    return;
+  }
+
+  const frag = document.createDocumentFragment();
+  S.events.forEach(ch => {
+    const d = document.createElement('div');
+    d.className = 'ev-card';
+    d.innerHTML = `
+      <div class="ev-cat"><span class="mi" style="font-size:11px">stadium</span> LIVE</div>
+      <div class="ev-name">${ch.name}</div>
+      <div class="ev-ch">${ch.group || ''}${ch.country ? ' · ' + (CN[ch.country] || ch.country) : ''}</div>
+      <div class="ev-live"><span class="mi">circle</span> EN DIRECT</div>
+    `;
+    d.onclick = () => playTV(ch);
+    frag.appendChild(d);
+  });
+  w.appendChild(frag);
+}
+
 // ══════════════════════════════════════════════════════════════
 // ░░░ INFINITE SCROLL ░░░
 // ══════════════════════════════════════════════════════════════
 function setupInfiniteScroll() {
   const sentinel = document.getElementById('sentinel');
-  if (!sentinel) return;
+  const gw = document.getElementById('gw');
+  if (!sentinel || !gw) return;
 
   const obs = new IntersectionObserver(entries => {
     if (entries[0].isIntersecting && !S.scrollLoading && S.dispIdx < S.filtered.length) {
       S.scrollLoading = true;
-      setTimeout(() => {
+      requestAnimationFrame(() => {
         renderGrid(false);
         S.scrollLoading = false;
-      }, 100);
+      });
     }
-  }, { root: document.getElementById('gw'), rootMargin: '400px' });
+  }, { root: gw, rootMargin: '400px' });
   obs.observe(sentinel);
+
+  gw.addEventListener('scroll', () => {
+    if (gw.scrollHeight - gw.scrollTop - gw.clientHeight < 600) {
+       if (!S.scrollLoading && S.dispIdx < S.filtered.length) {
+          S.scrollLoading = true;
+          renderGrid(false);
+          S.scrollLoading = false;
+       }
+    }
+  }, { passive: true });
 }
 
 // ══════════════════════════════════════════════════════════════
-// ░░░ PLAYER HLS ULTRA-OPTI ░░░
+// ░░░ PLAYER ░░░
 // ══════════════════════════════════════════════════════════════
 let hls = null;
 let retryCount = 0;
-const MAX_RETRIES = 10;
+const MAX_RETRIES = 5;
 
 function playTV(ch) {
   S.currentCh = ch;
+  retryCount = 0;
+
   document.querySelectorAll('.card').forEach(c => c.classList.toggle('now', c.dataset.id === ch.id));
 
-  document.getElementById('player').style.display = 'flex';
-  document.getElementById('pinfo').style.display = 'flex';
-  document.getElementById('pCtrls').style.display = 'flex';
-  document.getElementById('pname').textContent = ch.name;
-  document.getElementById('pgroup').textContent = `${ch.group || ''} ${ch.country ? '· '+(CN[ch.country]||ch.country) : ''}`;
+  const pa = document.getElementById('pa');
+  pa.classList.add('show');
 
-  const plogo = document.getElementById('plogo');
+  const pLogo = document.getElementById('pLogo');
   if (ch.logo) {
-    plogo.src = `/api/rtm/img?u=${encodeURIComponent(ch.logo)}`;
-    plogo.style.display = 'block';
-  } else plogo.style.display = 'none';
+    pLogo.src = `/api/rtm/img?u=${encodeURIComponent(ch.logo)}`;
+    pLogo.style.display = 'block';
+  } else pLogo.style.display = 'none';
 
+  document.getElementById('pName').textContent = ch.name;
+  document.getElementById('pMeta').textContent = (ch.group || '') + (ch.country ? ' · ' + (CN[ch.country] || ch.country) : '');
+
+  spinShow(true, 'Connexion...');
+  hideErr();
   loadStream(ch.id);
 }
 
 function loadStream(id) {
+  const v = document.getElementById('vid');
   if (hls) { hls.destroy(); hls = null; }
-  const video = document.getElementById('pvideo');
-  const status = document.getElementById('pstatus');
-  video.src = '';
-  status.textContent = 'Connexion...';
 
-  // Nouvelle route sécurisée par ID
+  v.pause();
+  v.src = '';
+  v.load();
+
   const src = `/api/rtm/live?id=${id}`;
 
   if (Hls.isSupported()) {
     hls = new Hls({
-      maxBufferLength: 15,       // Réduit pour économiser data (default 30)
-      maxBufferSize: 30*1000*1000, // 30MB max buffer
-      startLevel: 0,             // Commence en basse qualité
+      maxBufferLength: 15,
+      maxBufferSize: 30 * 1000 * 1000,
+      startLevel: 0,
       capLevelToPlayerSize: true,
       enableWorker: true,
     });
     hls.loadSource(src);
-    hls.attachMedia(video);
+    hls.attachMedia(v);
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
-      video.play().catch(() => {});
-      status.textContent = '🔴 EN DIRECT';
-      retryCount = 0;
+      v.play().catch(() => {});
+      spinShow(false);
     });
     hls.on(Hls.Events.ERROR, (e, data) => {
       if (data.fatal) {
         if (retryCount < MAX_RETRIES) {
           retryCount++;
-          status.textContent = `Reconnexion (${retryCount})...`;
+          spinShow(true, `Reconnexion (${retryCount}/${MAX_RETRIES})...`);
           setTimeout(() => loadStream(id), 2000);
         } else {
-          status.textContent = '⚠️ Flux indisponible';
+          spinShow(false);
+          showErr();
         }
       }
     });
-  } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-    video.src = src;
-    video.play().catch(() => {});
+  } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
+    v.src = src;
+    v.play().catch(() => {});
+    spinShow(false);
   }
 }
 
+function spinShow(on, msg = '') {
+  const ps = document.getElementById('pspin');
+  if (ps) {
+    ps.classList.toggle('gone', !on);
+    if (msg) document.getElementById('pmsg').textContent = msg;
+  }
+}
+
+function showErr() { document.getElementById('perr').style.display = 'flex'; }
+function hideErr() { document.getElementById('perr').style.display = 'none'; }
+function openSB() { document.getElementById('sb').classList.add('open'); document.getElementById('dov').classList.add('show'); }
+function closeSB() { document.getElementById('sb').classList.remove('open'); document.getElementById('dov').classList.remove('show'); }
+
 // ══════════════════════════════════════════════════════════════
-// ░░░ INITIALISATION ░░░
+// ░░░ EVENTS ░░░
 // ══════════════════════════════════════════════════════════════
 window.addEventListener('DOMContentLoaded', () => {
-  loadChannels();
-  setupInfiniteScroll();
+  boot();
 
-  const searchInput = document.getElementById('searchInput');
-  if (searchInput) {
-    searchInput.addEventListener('input', e => {
-      S.searchTerm = e.target.value.trim();
-      applyFilters();
-    });
-  }
-
-  const clearSearch = document.getElementById('clearSearch');
-  if (clearSearch) {
-    clearSearch.onclick = () => {
-      searchInput.value = '';
-      S.searchTerm = '';
-      applyFilters();
-    };
-  }
-
-  document.getElementById('pclose').onclick = () => {
-    document.getElementById('player').style.display = 'none';
-    if (hls) { hls.destroy(); hls = null; }
-    document.getElementById('pvideo').src = '';
-    S.currentCh = null;
-    document.querySelectorAll('.card').forEach(c => c.classList.remove('now'));
+  let st;
+  document.getElementById('si').oninput = e => {
+    clearTimeout(st);
+    st = setTimeout(() => { S.q = e.target.value; S.dispIdx = 0; applyFilters(); }, 300);
   };
 
-  document.getElementById('pRetry').onclick = () => {
-    if (S.currentCh) loadStream(S.currentCh.id);
+  document.getElementById('csi').oninput = e => { S.cq = e.target.value; buildCL(); };
+
+  document.getElementById('retryB').onclick = () => { hideErr(); if (S.currentCh) playTV(S.currentCh); };
+
+  document.getElementById('fsB').onclick = () => {
+    const v = document.getElementById('vid');
+    if (v.requestFullscreen) v.requestFullscreen();
+    else if (v.webkitRequestFullscreen) v.webkitRequestFullscreen();
+  };
+
+  document.getElementById('pipB').onclick = async () => {
+    const v = document.getElementById('vid');
+    try {
+      if (document.pictureInPictureElement) await document.exitPictureInPicture();
+      else await v.requestPictureInPicture();
+    } catch (e) { toast('PiP non supporté', 'err'); }
+  };
+
+  document.getElementById('dsB').onclick = () => {
+    S.dataSaver = !S.dataSaver;
+    document.getElementById('dsB').classList.toggle('on', S.dataSaver);
+    toast(S.dataSaver ? '🍃 Mode économie' : '🔋 Mode normal', 'info');
+    renderGrid(true);
+  };
+
+  document.getElementById('thB').onclick = () => {
+    document.body.classList.toggle('light');
+    const isLight = document.body.classList.contains('light');
+    document.getElementById('thB').querySelector('.mi').textContent = isLight ? 'dark_mode' : 'light_mode';
+  };
+
+  document.querySelectorAll('.tab').forEach(b => b.onclick = () => {
+    S.tab = b.dataset.tab;
+    S.group = null;
+    S.dispIdx = 0;
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    buildPills();
+    applyFilters();
+  });
+
+  document.querySelectorAll('.nb').forEach(b => b.onclick = () => {
+    const v = b.dataset.v;
+    S.view = v; S.country = null; S.group = null; S.dispIdx = 0;
+    document.querySelectorAll('.nb').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    buildCL(); buildPills(); applyFilters(); closeSB();
+  });
+
+  document.querySelectorAll('.mnt[data-v]').forEach(b => b.onclick = () => {
+    const v = b.dataset.v;
+    S.view = v; S.country = null; S.group = null; S.dispIdx = 0;
+    document.querySelectorAll('.mnt').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    applyFilters();
+  });
+
+  document.getElementById('evBtn').onclick = () => {
+    S.tab = 'events'; S.dispIdx = 0;
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('on'));
+    document.querySelector('[data-tab="events"]')?.classList.add('on');
+    applyFilters();
+  };
+
+  document.getElementById('mnuB').onclick = openSB;
+  document.getElementById('dov').onclick = closeSB;
+
+  document.getElementById('pa').onclick = () => {
+    const pa = document.getElementById('pa');
+    pa.classList.add('show');
+    clearTimeout(pa._t);
+    pa._t = setTimeout(() => pa.classList.remove('show'), 4000);
   };
 });
