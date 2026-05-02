@@ -201,6 +201,8 @@ app.use('/api/rtm', auth);
 // ══════════════════════════════════════════════════════════════
 // ░░░ PARSER M3U ULTRA-RAPIDE ░░░
 // ══════════════════════════════════════════════════════════════
+const CHANNEL_MAP = new Map();
+
 function parseM3U(text) {
   const lines = text.split('\n');
   const out = [];
@@ -233,6 +235,9 @@ function parseM3U(text) {
     } else if (line && !line.startsWith('#') && cur) {
       if (cur.name && /^https?:\/\//i.test(line)) {
         cur.url = line;
+        // Generate a unique and stable ID for the session
+        cur.id = crypto.createHash('md5').update(cur.name + cur.url).digest('hex').substring(0, 12);
+
         if (!isBlocked(line)) {
           out.push({ ...cur });
         } else {
@@ -248,24 +253,30 @@ function parseM3U(text) {
 
 function saveChannels(all) {
   const byC = {}, byG = {}, cs = new Set(), gs = new Set();
+  CHANNEL_MAP.clear();
   
-  for (const ch of all) {
-    const c = ch.country || 'XX';
-    const g = ch.group || 'Other';
-    (byC[c] = byC[c] || []).push(ch);
-    (byG[g] = byG[g] || []).push(ch);
+  const publicChannels = all.map(ch => {
+    CHANNEL_MAP.set(ch.id, ch.url);
+    const { url, ...rest } = ch;
+
+    const c = rest.country || 'XX';
+    const g = rest.group || 'Other';
+    (byC[c] = byC[c] || []).push(rest);
+    (byG[g] = byG[g] || []).push(rest);
     cs.add(c);
     gs.add(g);
-  }
+
+    return rest;
+  });
   
-  cSet('channels', all);
+  cSet('channels', publicChannels);
   cSet('byCountry', byC);
   cSet('byGroup', byG);
   cSet('countries', [...cs].sort((a, b) => a === 'MG' ? -1 : b === 'MG' ? 1 : a.localeCompare(b)));
   cSet('groups', [...gs].sort());
   cSet('lastUpdate', new Date().toISOString());
   
-  console.log(`✅ ${all.length} chaînes sauvegardées en cache`);
+  console.log(`✅ ${publicChannels.length} chaînes sauvegardées en cache (URLs masquées)`);
 }
 
 let _loading = false;
@@ -376,6 +387,15 @@ function resolveUrl(base, rel) {
   } catch (_) { return rel; }
 }
 
+// Token pour masquer les URLs de segments (expire après 2h)
+const SEG_CACHE = new NodeCache({ stdTTL: 7200 });
+
+function getSegId(url) {
+  const id = crypto.createHash('md5').update(url).digest('hex').substring(0, 16);
+  SEG_CACHE.set(id, url);
+  return id;
+}
+
 // Réécriture M3U8 — toutes les URLs → notre proxy
 function rewriteM3U8(text, baseUrl) {
   const lines = text.split('\n');
@@ -389,7 +409,7 @@ function rewriteM3U8(text, baseUrl) {
       const rw = t.replace(/URI="([^"]+)"/g, (_, uri) => {
         const abs = resolveUrl(baseUrl, uri);
         if (isBlocked(abs)) return 'URI=""';
-        return `URI="/api/rtm/live?url=${encodeURIComponent(abs)}"`;
+        return `URI="/api/rtm/live?sid=${getSegId(abs)}"`;
       });
       out.push(rw);
       continue;
@@ -397,7 +417,7 @@ function rewriteM3U8(text, baseUrl) {
     // Ligne URL (segment ou sous-playlist)
     const abs = resolveUrl(baseUrl, t);
     if (isBlocked(abs)) continue; // skip ad segments
-    out.push(`/api/rtm/live?url=${encodeURIComponent(abs)}`);
+    out.push(`/api/rtm/live?sid=${getSegId(abs)}`);
   }
   return out.join('\n');
 }
@@ -428,8 +448,17 @@ const axLive = axios.create({
 });
 
 app.get('/api/rtm/live', async (req, res) => {
-  const url = req.query.url;
-  if (!url || !/^https?:\/\//i.test(url)) return res.status(400).send('Invalid URL');
+  let url = req.query.url;
+  const id = req.query.id;
+  const sid = req.query.sid;
+
+  if (id) {
+    url = CHANNEL_MAP.get(id);
+  } else if (sid) {
+    url = SEG_CACHE.get(sid);
+  }
+
+  if (!url || !/^https?:\/\//i.test(url)) return res.status(400).send('Invalid Stream Reference');
   if (isBlocked(url)) { cStats.blocked++; return res.status(403).send('Blocked'); }
 
   const looksSegment = isSegmentUrl(url);

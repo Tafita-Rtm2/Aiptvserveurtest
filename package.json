@@ -2,10 +2,10 @@
   "name": "rtm-vault-server",
   "version": "2.0.0",
   "description": "Secure RTM Vault for StreamVerse",
-  "main": "server.js",
+  "main": "server_back.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+    "start": "node server_back.js",
+    "dev": "nodemon server_back.js"
   },
   "engines": {
     "node": ">=18.0.0"

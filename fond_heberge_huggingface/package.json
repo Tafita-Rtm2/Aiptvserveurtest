@@ -2,9 +2,9 @@
   "name": "streamverse-frontend",
   "version": "1.0.0",
   "description": "StreamVerse IPTV Frontend for HuggingFace",
-  "main": "server.js",
+  "main": "server_fond.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server_fond.js"
   },
   "engines": {
     "node": ">=18.0.0"
