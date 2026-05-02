@@ -269,12 +269,6 @@ function saveChannels(all) {
 }
 
 let _loading = false;
-const chMap = new Map();
-
-function getPublicChannels(channels) {
-  return channels.map(({ url, ...rest }) => ({ ...rest }));
-}
-
 async function fetchIPTV() {
   if (_loading) return;
   _loading = true;
@@ -294,15 +288,8 @@ async function fetchIPTV() {
     }
     
     const m3uText = response.data;
-    const rawChannels = parseM3U(m3uText);
+    const channels = parseM3U(m3uText);
     
-    chMap.clear();
-    const channels = rawChannels.map(ch => {
-      const id = crypto.createHash('md5').update(ch.url).digest('hex').substring(0, 12);
-      chMap.set(id, ch.url);
-      return { ...ch, id };
-    });
-
     channels.sort((a, b) => {
       if (a.country === 'MG' && b.country !== 'MG') return -1;
       if (b.country === 'MG' && a.country !== 'MG') return 1;
@@ -330,14 +317,12 @@ app.get('/api/rtm/channels', (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const limit = Math.min(parseInt(req.query.limit) || 10000, 20000);
   
-  const paged = all.slice((page - 1) * limit, (page - 1) * limit + limit);
-
   enc(res, {
     total: all.length,
     page,
     limit,
     pages: Math.ceil(all.length / limit),
-    channels: getPublicChannels(paged),
+    channels: all.slice((page - 1) * limit, (page - 1) * limit + limit),
   });
 });
 
@@ -357,7 +342,7 @@ app.get('/api/rtm/search', (req, res) => {
   if (country) ch = ch.filter(c => c.country === country);
   if (q) ch = ch.filter(c => c.name.toLowerCase().includes(q) || c.group.toLowerCase().includes(q));
   
-  enc(res, { total: ch.length, results: getPublicChannels(ch.slice(0, 1000)) });
+  enc(res, { total: ch.length, results: ch.slice(0, 1000) });
 });
 
 // ══════════════════════════════════════════════════════════════
@@ -404,9 +389,7 @@ function rewriteM3U8(text, baseUrl) {
       const rw = t.replace(/URI="([^"]+)"/g, (_, uri) => {
         const abs = resolveUrl(baseUrl, uri);
         if (isBlocked(abs)) return 'URI=""';
-        // Utilisation de base64 pour les URLs internes des segments/playlists pour les cacher
-        const b64 = Buffer.from(abs).toString('base64');
-        return `URI="/api/rtm/live?id=${b64}"`;
+        return `URI="/api/rtm/live?url=${encodeURIComponent(abs)}"`;
       });
       out.push(rw);
       continue;
@@ -414,8 +397,7 @@ function rewriteM3U8(text, baseUrl) {
     // Ligne URL (segment ou sous-playlist)
     const abs = resolveUrl(baseUrl, t);
     if (isBlocked(abs)) continue; // skip ad segments
-    const b64 = Buffer.from(abs).toString('base64');
-    out.push(`/api/rtm/live?id=${b64}`);
+    out.push(`/api/rtm/live?url=${encodeURIComponent(abs)}`);
   }
   return out.join('\n');
 }
@@ -446,24 +428,8 @@ const axLive = axios.create({
 });
 
 app.get('/api/rtm/live', async (req, res) => {
-  let url = req.query.url;
-  const id = req.query.id;
-
-  if (id) {
-    if (chMap.has(id)) {
-      url = chMap.get(id);
-    } else {
-      // Tentative de décodage base64 pour les segments/sous-playlists réécrits
-      try {
-        url = Buffer.from(id, 'base64').toString('utf8');
-        if (!url.startsWith('http')) url = null;
-      } catch (_) {
-        url = null;
-      }
-    }
-  }
-
-  if (!url || !/^https?:\/\//i.test(url)) return res.status(400).send('Invalid URL or ID');
+  const url = req.query.url;
+  if (!url || !/^https?:\/\//i.test(url)) return res.status(400).send('Invalid URL');
   if (isBlocked(url)) { cStats.blocked++; return res.status(403).send('Blocked'); }
 
   const looksSegment = isSegmentUrl(url);
@@ -555,14 +521,7 @@ app.get('/api/rtm/img', async (req, res) => {
   }
   
   try {
-    const r = await axGet(url, {
-      responseType: 'arraybuffer',
-      timeout: 8000,
-      headers: {
-        'Referer': 'https://www.themoviedb.org/',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      }
-    });
+    const r = await axGet(url, { responseType: 'arraybuffer', timeout: 8000 });
     const buf = Buffer.from(r.data);
     const ct = r.headers['content-type'] || 'image/jpeg';
     
@@ -772,9 +731,9 @@ app.get('/api/rtm/embed', (req, res) => {
       url = providerFn(id, s, ep);
     }
 
-    // Obscurcir l'URL du provider pour le frontend HuggingFace
-    const b64Url = Buffer.from(url).toString('base64');
-    res.json({ url: b64Url, provider: retry });
+    // Ne jamais exposer l'URL réelle au client — elle passe par notre proxy
+    // Le client ne voit que la route /api/rtm/embed, jamais le provider
+    res.json({ url, provider: retry }); // provider = index (pour debug)
   } catch (e) {
     res.status(400).json({ error: 'Invalid token' });
   }
