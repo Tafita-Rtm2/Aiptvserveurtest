@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 7860;
 // ═══════════════════════════════════════════════════════════════
 // ░░░ CONFIGURATION BACKEND ░░░
 // ═══════════════════════════════════════════════════════════════
-const BACKEND_URL = process.env.BACKEND_URL || 'https://tafita1206-kkiakkaikaccskgdebkufevnkagcs.hf.space';
+const BACKEND_URL = process.env.BACKEND_URL || 'https://tafitaniaina-tvserveur.hf.space';
 const AUTH_KEY = process.env.AUTH_KEY || 'rtm_secret_key_2024_ultra';
 
 console.log('🔗 Backend URL:', BACKEND_URL);
@@ -120,11 +120,18 @@ app.use(compression({
 
 app.use((req, res, next) => {
   res.set('X-Content-Type-Options', 'nosniff');
+  res.set('X-Frame-Options', 'SAMEORIGIN');
+  res.set('X-XSS-Protection', '1; mode=block');
+  res.set('Referrer-Policy', 'no-referrer-when-downgrade');
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Allow-Methods', 'GET,HEAD,OPTIONS');
   res.set('Access-Control-Allow-Headers', 'Range,Content-Type,Authorization');
   res.set('Access-Control-Expose-Headers', 'Content-Range,Content-Length,Accept-Ranges');
   res.set('X-Powered-By', 'VideoVerse-Frontend');
+  
+  // Strict CSP
+  res.set('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' fonts.googleapis.com; font-src 'self' fonts.gstatic.com fonts.googleapis.com; img-src 'self' data: https:; media-src 'self' blob:; connect-src 'self'; frame-src 'self' https://www.youtube.com;");
+
   next();
 });
 
@@ -184,13 +191,18 @@ app.get('/api/rtm/img', async (req, res) => {
 // ░░░ PROXY LIVE TV ░░░
 // ═══════════════════════════════════════════════════════════════
 app.get('/api/rtm/live', async (req, res) => {
-  const url = req.query.url;
-  if (!url) return res.status(400).end();
+  const { url, id, sid } = req.query;
+  if (!url && !id && !sid) return res.status(400).end();
   
-  if (isAd(url)) return res.status(403).end();
+  if (url && isAd(url)) return res.status(403).end();
   
+  const params = { auth: AUTH_KEY };
+  if (url) params.url = url;
+  if (id) params.id = id;
+  if (sid) params.sid = sid;
+
   const go = () => client.get(`${BACKEND_URL}/api/rtm/live`, {
-    params: { url, auth: AUTH_KEY },
+    params,
     headers: authHeaders(),
     responseType: 'stream',
     timeout: 20000,
